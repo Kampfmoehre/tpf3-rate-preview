@@ -1,0 +1,10 @@
+{
+    "en": {
+        "Line rate": "Line rate",
+        "rate_no_vehicles": "n/a (no vehicle on the line yet)"
+    },
+    "de": {
+        "Line rate": "Linienrate",
+        "rate_no_vehicles": "n. v. (noch kein Fahrzeug auf der Linie)"
+    }
+}

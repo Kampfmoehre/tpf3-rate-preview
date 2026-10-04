@@ -1,0 +1,22 @@
+{
+    "authors": [
+        {
+            "name": "Kampfmoehre",
+            "role": "CREATOR"
+        }
+    ],
+    "description": "Shows the estimated line rate and frequency in the vehicle dialog before you buy, replace or modify vehicles: the line's current values and what they would be afterwards, for all carriers.\n\nRate: the capacity change scaled with the line's current rate; multi-purpose wagons are counted once and only the capacity matching the line's cargo counts. Frequency: cycle time divided by the new number of vehicles (shown when buying).\n\nOnly available for lines that already have at least one vehicle; the game knows travel times only once a vehicle runs. The estimate assumes new vehicles keep the cycle time of the existing ones.\n\nPurely cosmetic, achievements stay enabled.",
+    "name": "Line Rate Preview",
+    "summary": "Estimated line rate in the vehicle purchase dialog",
+    "tags": [
+        "Script Mod"
+    ],
+    "url": "",
+    "localization": {
+        "de": {
+            "name": "Linienraten-Vorschau",
+            "summary": "Geschätzte Linienrate im Fahrzeug-Kaufdialog",
+            "description": "Zeigt im Fahrzeugdialog eine geschätzte Linienrate und einen geschätzten Takt, bevor du Fahrzeuge kaufst, ersetzt oder anpasst: die aktuellen Werte der Linie und die Werte danach, für alle Verkehrsmittel.\n\nRate: die Kapazitätsänderung, skaliert mit der aktuellen Rate der Linie; Mehrzweckwagen zählen einfach, und nur die zur Fracht der Linie passende Kapazität zählt. Takt: Umlaufzeit geteilt durch die neue Fahrzeugzahl (beim Kaufen angezeigt).\n\nNur für Linien mit mindestens einem Fahrzeug verfügbar; das Spiel kennt Fahrzeiten erst, wenn ein Fahrzeug fährt. Die Schätzung nimmt an, dass neue Fahrzeuge die Umlaufzeit der vorhandenen behalten.\n\nRein kosmetisch, Achievements bleiben aktiv."
+        }
+    }
+}

@@ -1,0 +1,9 @@
+# Files the game generates inside the staging copy; never belong in the source tree
+.cooked_pc/
+.cooked_console/
+_metadata/mod.io_fileid.txt
+
+# local scratch
+*.bak
+*.orig
+*~
