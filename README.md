@@ -21,7 +21,7 @@ of vehicles); replacing or modifying does not change the vehicle count.
   with 20 seats and 12 cargo slots counts 12 on an oil line).
 - Purely cosmetic: achievements stay enabled. English and German.
 
-Available on mod.io: <https://mod.io/g/transportfever3/m/line-rate-preview>
+Available on mod.io: <https://mod.io/g/transportfever3/m/line-rate-preview1>
 
 ## Limitations
 
