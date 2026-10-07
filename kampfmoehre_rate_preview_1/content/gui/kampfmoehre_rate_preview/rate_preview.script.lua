@@ -32,7 +32,7 @@
 --    second vertical builtin.BoxLayout of that render is its right column.
 
 function data()
-	local VERSION = "0.12.5"
+	local VERSION = "0.12.6"
 
 	local react = ug_require "::/gui/main/react.lua"
 	local builtin = ug_require "::/gui/main/builtin.lua"
@@ -232,6 +232,23 @@ function data()
 	local ctx = nil
 	local pendingBuyLine = nil -- set by getBestDepotForLine, consumed by "buyVehicles"
 
+	-- Capacity of an existing vehicle computed the same way as a cart entry
+	-- (per-type capacities over the line's cargo types, capped at the total),
+	-- so replacing a vehicle with the same model yields a zero change.
+	local function vehicleRelevantCapacity(vehicle, types)
+		local data = nil
+		pcall(function()
+			local tv = api.engine.getComponent(vehicle, api.type.ComponentType.TRANSPORT_VEHICLE)
+			if not tv then return end
+			local vs = raw.makeParts({ tv.transportVehicleConfig.vehicles })
+			data = raw.collect(vs, tv.modifiers)
+		end)
+		if type(data) ~= "table" then
+			return vehicleCapacity(vehicle)
+		end
+		return relevantCapacity({ cap = data.totalCapacity, allCargoTypes = data.allCargoTypes }, types)
+	end
+
 	local function contextFromEvent(name, param)
 		local carrier = type(param) == "table" and param.carrier or nil
 		if name == "buyVehicles" then
@@ -246,10 +263,14 @@ function data()
 			if type(vehicles) ~= "table" or #vehicles == 0 then
 				return nil
 			end
-			local line, oldCapacity, oldCaps = nil, 0, {}
+			local line = nil
 			for _, v in ipairs(vehicles) do
 				line = line or vehicleLine(v)
-				local c = vehicleCapacity(v)
+			end
+			local types = line and lineCargoTypes(line) or nil
+			local oldCapacity, oldCaps = 0, {}
+			for _, v in ipairs(vehicles) do
+				local c = vehicleRelevantCapacity(v, types)
 				oldCaps[#oldCaps + 1] = c
 				oldCapacity = oldCapacity + c
 			end
