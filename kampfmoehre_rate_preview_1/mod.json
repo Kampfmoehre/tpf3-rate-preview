@@ -5,10 +5,16 @@
     "modId": "kampfmoehre_rate_preview_1",
     "options": null,
     "params": null,
-    "postRunScript": { "fileName": "" },
-    "preRunScript": { "fileName": "" },
-    "revision": 1,
-    "runScript": { "fileName": "" },
+    "postRunScript": {
+        "fileName": ""
+    },
+    "preRunScript": {
+        "fileName": ""
+    },
+    "revision": 2,
+    "runScript": {
+        "fileName": ""
+    },
     "severityAdd": "None",
     "severityRemove": "None"
 }

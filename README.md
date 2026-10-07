@@ -30,9 +30,11 @@ Available on mod.io: <https://mod.io/g/transportfever3/m/line-rate-preview1>
   which is not accessible to mods). With no vehicle the mod shows "n/a".
   Buy the first vehicle, then the preview works for every further one.
 - The estimate scales the game's current rate with the capacity change and
-  assumes the new vehicle keeps the same cycle time. A slower or faster
-  vehicle than the existing ones shifts the result; the game's rate also
-  starts as an estimate and settles after the first full cycle.
+  assumes the new vehicle keeps the same cycle time. A faster vehicle than
+  the line's current ones shortens the cycle, so the real rate ends up
+  higher than estimated; a slower one lower. The bar marks this with (+) / (-)
+  after the estimate (compared by top speed, 2 % tolerance). The game's own
+  rate also starts as an estimate and settles after the first full cycle.
 - Only when the dialog was opened from the line manager for a line (the
   "Buy Vehicles" button of a line, or Replace/Modify of its vehicles). Opened
   from a depot without a line there is nothing to compute.

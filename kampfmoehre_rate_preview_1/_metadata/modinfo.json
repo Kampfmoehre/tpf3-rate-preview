@@ -5,7 +5,7 @@
             "role": "CREATOR"
         }
     ],
-    "description": "Shows the estimated line rate and frequency in the vehicle dialog before you buy, replace or modify vehicles: the line's current values and what they would be afterwards, for all carriers.\n\nRate: the capacity change scaled with the line's current rate; multi-purpose wagons are counted once and only the capacity matching the line's cargo counts. Frequency: cycle time divided by the new number of vehicles (shown when buying).\n\nOnly available for lines that already have at least one vehicle; the game knows travel times only once a vehicle runs. The estimate assumes new vehicles keep the cycle time of the existing ones.\n\nPurely cosmetic, achievements stay enabled.",
+    "description": "Shows a preview for new line rate and frequency when vehicles are bought, changed or replaced.\n\nThe preview uses the current circulation time of the line as base for the calulcation, so it only works if at least one vehicle is already running on the line.\n\nWorks also for composed vehicles, it counts the capacity for the cargo that is set on the line.\n\nSince the circulation time changes with speed, there is a small indicator (+)/(-) when replacing a vehicle with different speed. The actual rate will then differ accordingly in the pointed direction. It cannot be calculated exactly due to loading/unloading as well as acceleration and braking times.\n\nAchievements are not disabled, the mod only changes the display in the purchase dialog.",
     "name": "Line Rate Preview",
     "summary": "Estimated line rate in the vehicle purchase dialog",
     "tags": [
@@ -16,7 +16,7 @@
         "de": {
             "name": "Linienraten-Vorschau",
             "summary": "Geschätzte Linienrate im Fahrzeug-Kaufdialog",
-            "description": "Zeigt im Fahrzeugdialog eine geschätzte Linienrate und einen geschätzten Takt, bevor du Fahrzeuge kaufst, ersetzt oder anpasst: die aktuellen Werte der Linie und die Werte danach, für alle Verkehrsmittel.\n\nRate: die Kapazitätsänderung, skaliert mit der aktuellen Rate der Linie; Mehrzweckwagen zählen einfach, und nur die zur Fracht der Linie passende Kapazität zählt. Takt: Umlaufzeit geteilt durch die neue Fahrzeugzahl (beim Kaufen angezeigt).\n\nNur für Linien mit mindestens einem Fahrzeug verfügbar; das Spiel kennt Fahrzeiten erst, wenn ein Fahrzeug fährt. Die Schätzung nimmt an, dass neue Fahrzeuge die Umlaufzeit der vorhandenen behalten.\n\nRein kosmetisch, Achievements bleiben aktiv."
+            "description": "Zeigt eine Vorschau für die neue Rate und Takt einer Linie wenn Fahrzeuge dazu gekauft, geändertz oder ersetzt werden.\n\nDie Vorschau nutzt die aktuelle Umlaufzeit der Linie als Berechnung, deshalb funktioniert sie nur, wenn schon mindestens ein Fahrzeug auf der Linie fährt.\n\nFunktioniert auch für zusammengestellte Fahrzeuge, es wird die Kapazität für die Fracht gezählt, die auf der Linie eingestellt ist.\n\nDa sich die Umlaufzeit mit der Geschwindigkeit ändert, gibt es einen kleinen Indikator (+)/(-). Die tatsächliche Rate weicht dann entsprechend ab. Genau lässt sie sich wegen Lade/Entlade sowie Anfahr- und Bremszeiten nicht berechnen.\n\nErfolge werden nicht deaktiviert, die Mod ändert nur die Anzeige im Kaufdialog."
         }
     }
 }

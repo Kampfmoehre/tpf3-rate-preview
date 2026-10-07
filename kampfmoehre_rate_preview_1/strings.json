@@ -1,10 +1,12 @@
 {
     "en": {
         "Line rate": "Line rate",
-        "rate_no_vehicles": "n/a (no vehicle on the line yet)"
+        "rate_no_vehicles": "n/a (no vehicle on the line yet)",
+        "rate_hint_tooltip": "(+) the new vehicles are faster than the line's current ones, the real rate will be higher than estimated; (-) slower, it will be lower."
     },
     "de": {
         "Line rate": "Linienrate",
-        "rate_no_vehicles": "n. v. (noch kein Fahrzeug auf der Linie)"
+        "rate_no_vehicles": "n. v. (noch kein Fahrzeug auf der Linie)",
+        "rate_hint_tooltip": "(+) die neuen Fahrzeuge sind schneller als die bisherigen der Linie, die echte Rate wird höher ausfallen als geschätzt; (-) langsamer, sie wird niedriger."
     }
 }

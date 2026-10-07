@@ -32,11 +32,21 @@
 --    second vertical builtin.BoxLayout of that render is its right column.
 
 function data()
-	local VERSION = "0.11.0"
+	local VERSION = "0.12.5"
 
 	local react = ug_require "::/gui/main/react.lua"
 	local builtin = ug_require "::/gui/main/builtin.lua"
 	local vehicle_store_util = ug_require "::/gui/line_vehicle_mgmt/vehicle_store_util.tl"
+
+	-- unwrapped helpers for our own lookups (the cart tracking below wraps the
+	-- module's fields, and those wrappers must not see our internal calls)
+	if not builtin._kampfmoehreRatePreviewRaw then
+		builtin._kampfmoehreRatePreviewRaw = {
+			makeParts = vehicle_store_util.makeMultipleVehiclesFromParts,
+			collect = vehicle_store_util.collectVehicleData,
+		}
+	end
+	local raw = builtin._kampfmoehreRatePreviewRaw
 	local line_util = ug_require "::/gui/line_vehicle_mgmt/line_util.tl"
 	local gui_react_util = ug_require "::/gui/main/gui_react_util.tl"
 	local statistics_react_util = ug_require "::/gui/statistics/statistics_react_util.tl"
@@ -85,6 +95,49 @@ function data()
 		return 0
 	end
 
+	-- Top speed of an existing vehicle's consist in m/s (incl. maintenance
+	-- penalty), as the game's condition card computes it; nil if unknown.
+	local function vehicleTopSpeed(vehicle)
+		local speed = nil
+		local okT, errT = pcall(function()
+			local tv = api.engine.getComponent(vehicle, api.type.ComponentType.TRANSPORT_VEHICLE)
+			if not tv then return end
+			local vs = raw.makeParts({ tv.transportVehicleConfig.vehicles })
+			local data = raw.collect(vs, tv.modifiers)
+			speed = data and (data.speedAdjusted or data.speed) or nil
+			if speed == math.huge then speed = data and data.speed or nil end
+			if speed == math.huge then speed = nil end
+		end)
+		if not okT then log.warning("[rate_preview] vehicleTopSpeed failed: " .. tostring(errT)) end
+		return speed
+	end
+
+	-- Reference speed of the line: the speed of its current vehicles (min),
+	-- i.e. what the current rate was measured with.
+	local function lineReferenceSpeed(line)
+		local ok, vs = pcall(api.engine.system.transportVehicleSystem.getLineVehicles, line)
+		if not ok or type(vs) ~= "table" then return nil end
+		local ref = nil
+		for _, v in ipairs(vs) do
+			local sp = vehicleTopSpeed(v)
+			if sp and sp > 0 and (ref == nil or sp < ref) then ref = sp end
+		end
+		return ref
+	end
+
+	-- "(+)" if the new consist is faster than the line's current vehicles (the
+	-- estimate is then conservative), "(-)" if slower, "" if equal/unknown.
+	-- Note: defined before the local `ctx` exists, so the line is passed in.
+	local function speedHint(newSpeed, line)
+		if line == nil or type(newSpeed) ~= "number" or newSpeed <= 0 or newSpeed == math.huge then return "" end
+		local ref = lineReferenceSpeed(line)
+		if not ref then return "" end
+		-- plain ASCII: the game font has no arrow glyphs
+		if newSpeed > ref * 1.02 then return " (+)" end
+		if newSpeed < ref * 0.98 then return " (-)" end
+		return ""
+	end
+
 	local function vehicleLine(vehicle)
 		local ok, tv = pcall(api.engine.getComponent, vehicle, api.type.ComponentType.TRANSPORT_VEHICLE)
 		if not ok or tv == nil then
@@ -114,8 +167,7 @@ function data()
 	-- e: cart entry or vehicleData with allCargoTypes {cargoTypeId : capacity},
 	-- cap/totalCapacity (physical), capCargo/totalCapacityCargo (freight part).
 	-- Multi-purpose wagons list the same slots under every cargo type, so the
-	-- per-type sum is capped at the physical capacity (freight-only when the
-	-- line carries no passengers).
+	-- per-type sum is capped at the physical capacity.
 	local function relevantCapacity(e, types)
 		if e == nil then return 0 end
 		local total = e.cap or e.totalCapacity or 0
@@ -123,11 +175,8 @@ function data()
 		if types == nil or type(all) ~= "table" then
 			return total
 		end
-		local okP, paxId = pcall(cargo_util.getPassengerCargoTypeId)
-		paxId = (okP and type(paxId) == "number") and paxId or 0
-		local sum, any, linePax = 0, false, false
+		local sum, any = 0, false
 		for _, t in ipairs(types) do
-			if t == paxId then linePax = true end
 			local c = all[t]
 			if type(c) == "number" then
 				sum = sum + c
@@ -137,30 +186,33 @@ function data()
 		if not any then
 			return total
 		end
-		local limit = total
-		if not linePax then
-			local cargoOnly = e.capCargo or e.totalCapacityCargo
-			if type(cargoOnly) == "number" and cargoOnly > 0 then limit = cargoOnly end
-		end
-		return math.min(sum, limit)
+		-- cap at the physical total only: totalCapacityCargo is the largest
+		-- single compartment, not the freight total (CarGoTram: 14 of 60)
+		return math.min(sum, total)
 	end
 
 	-- fingerprint of a cart entry's parts (model ids), to detect edits in
 	-- Replace/Modify mode where the cart starts out as the current consist
+	-- Iterates a Lua table or a native (userdata) vector from the engine.
+	local function forEach(list, fn)
+		if type(list) == "table" then
+			for _, v in ipairs(list) do fn(v) end
+		elseif list ~= nil then
+			pcall(function()
+				for _, v in ipairs_native(list) do fn(v) end
+			end)
+		end
+	end
+
 	local function partsFingerprint(vehicleParts)
 		local ids = {}
-		if type(vehicleParts) == "table" then
-			for _, list in ipairs(vehicleParts) do
-				if type(list) == "table" then
-					for _, part in ipairs(list) do
-						-- parts are C++ userdata, so read the id guarded instead of type-checking
-						local ok, modelId = pcall(function() return part.part.modelId end)
-						ids[#ids + 1] = tostring(ok and modelId or "?")
-					end
-					ids[#ids + 1] = "|"
-				end
-			end
-		end
+		forEach(vehicleParts, function(list)
+			forEach(list, function(part)
+				local ok, modelId = pcall(function() return part.part.modelId end)
+				ids[#ids + 1] = tostring(ok and modelId or "?")
+			end)
+			ids[#ids + 1] = "|"
+		end)
 		return table.concat(ids, ",")
 	end
 
@@ -317,6 +369,9 @@ function data()
 			if cartParts ~= nil and vehicles == cartParts then
 				cartParts = nil
 				pendingEntry = {
+					-- plain top speed: new vehicles have no maintenance penalty, and
+					-- speedAdjusted is math.huge when no modifiers were passed
+					speed = (type(result) == "table" and result.speed) or nil,
 					cap = (type(result) == "table" and result.totalCapacity) or 0,
 					capCargo = (type(result) == "table" and result.totalCapacityCargo) or 0,
 					allCargoTypes = (type(result) == "table" and result.allCargoTypes) or nil,
@@ -375,7 +430,9 @@ function data()
 				return nil
 			end
 			local kind = lineCargoTypes(ctx.line)
-			if (ctx.mode == "Replace" or ctx.mode == "Modify") and #cartEntries > 0 and not cartEdited() then
+			-- Modify starts with the current consists -> estimate only after an edit.
+			-- Replace starts with the first list entry, so every selection counts.
+			if ctx.mode == "Modify" and #cartEntries > 0 and not cartEdited() then
 				local stats = lineStats(ctx.line)
 				if stats == nil or stats.rate <= 0 then return nil end
 				return _("Line rate") .. ": " .. formatInt(stats.rate)
@@ -413,7 +470,16 @@ function data()
 				end
 			end
 			if text == nil then return nil end
-			return _("Line rate") .. ": " .. text
+			-- speed of the new consist: slowest cart entry, or the shown vehicle
+			local newSpeed = nil
+			for _, e in ipairs(cartEntries) do
+				if type(e.speed) == "number" and e.speed > 0 and e.speed ~= math.huge and (newSpeed == nil or e.speed < newSpeed) then newSpeed = e.speed end
+			end
+			if newSpeed == nil and lastShownVehicleData then
+				newSpeed = lastShownVehicleData.speed
+			end
+			local okH, hint = pcall(speedHint, newSpeed, ctx.line)
+			return _("Line rate") .. ": " .. text .. ((okH and hint) or "")
 		end
 
 		-- the bar's stretch spacer sits right before the buy button; remember the
