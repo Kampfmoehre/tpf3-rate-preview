@@ -4,14 +4,26 @@
     "incompatibilities": null,
     "modId": "kampfmoehre_rate_preview_1",
     "options": null,
-    "params": null,
+    "params": [
+        {
+            "defaultIndex": 0,
+            "key": "roughEstimate",
+            "name": "rate_rough_param_name",
+            "tooltip": "rate_rough_param_tooltip",
+            "uiType": "Button",
+            "values": [
+                "rate_param_off",
+                "rate_param_on"
+            ]
+        }
+    ],
     "postRunScript": {
         "fileName": ""
     },
     "preRunScript": {
         "fileName": ""
     },
-    "revision": 2,
+    "revision": 4,
     "runScript": {
         "fileName": ""
     },

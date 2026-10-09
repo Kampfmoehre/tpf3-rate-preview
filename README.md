@@ -25,10 +25,20 @@ Available on mod.io: <https://mod.io/g/transportfever3/m/line-rate-preview1>
 
 ## Limitations
 
-- **No estimate for a line without vehicles.** The game computes the rate
-  from the vehicles actually running (travel times from its pathfinding,
-  which is not accessible to mods). With no vehicle the mod shows "n/a".
-  Buy the first vehicle, then the preview works for every further one.
+- **A line without vehicles normally shows "n/a".** The game computes the
+  rate from the vehicles actually running (travel times from its
+  pathfinding, which is not accessible to mods). Buy the first vehicle, then
+  the preview works for every further one.
+- **Optional rough estimate for empty lines** (mod parameter, off by
+  default): shown as "≈ 150 (rough)". The round trip is modelled as travel
+  time plus the dwell time of every stop, calibrated on your other lines of
+  the same carrier and cargo kind (see "How the rough estimate works").
+  Measured on a large savegame the median error of the travel part is
+  8-16 %, individual lines can be off by 30 % and more. Needs at least one
+  other line of the same carrier with vehicles; six or more give the full
+  travel model. Note that the game's own rate right after the purchase is
+  provisional and can be off by 50 % until the vehicle completed a full
+  round trip.
 - The estimate scales the game's current rate with the capacity change and
   assumes the new vehicle keeps the same cycle time. A faster vehicle than
   the line's current ones shortens the cycle, so the real rate ends up
@@ -72,17 +82,59 @@ wrapping their fields affects the base scripts):
   `statistics_react_util.calculateCargoColumnDataForLine/-ForVehicle(...).demand`
   and `cargo_util.getSortedProducedCargoTypes` for the line's cargo types.
 
+## How the rough estimate works
+
+The game computes a line's rate as capacity x vehicles x (year / round trip),
+with the round trip measured from the running vehicles. For a line without
+vehicles the mod reconstructs the round trip:
+
+    travel  = p * len / topSpeed + q * len + b * stops
+    dwell   = per stop: 2 s arrive + 2 s depart + waiting + loading
+    rate    = capacity * k / (travel + dwell)
+
+- `len` is the straight-line round trip through the line's stops and
+  waypoints. `p`, `q`, `b` are fitted by least squares on your other lines
+  of the same carrier and cargo kind (passengers vs freight), using the
+  engine's per-section travel times of their vehicles, which exclude dwell.
+  `p` is the share limited by the vehicle's top speed, `q` the share limited
+  by the road or track (buses: almost all of it, about 30 km/h effective),
+  `b` the seconds per stop for braking and accelerating (buses ~17 s,
+  trucks ~40 s, ships ~90 s per harbour). With fewer than six reference
+  lines a single factor on the top speed is used instead.
+- `k` is the year length the game's rate uses (about 1460 s at default
+  settings), also taken from the reference lines.
+- Loading time per unit is `16 x penalty / loadSpeed` seconds for freight
+  and `1 / loadSpeed` for passengers, where `penalty = 1 / (terminal
+  modifier x stock modifier)`. The terminal modifier is read from the stop's
+  terminal (industry terminals 2, plain station terminals 1, specialised
+  cargo stations 2 for their cargo class); the stock (warehouse) modifier is
+  not reachable from the UI API and assumed 1. Freight is loaded once and
+  unloaded once per round trip with full capacity, plus 2.3 s overhead and
+  5.5 s mean waiting per stop. Passenger stops take 8.4 s plus the boarding
+  and alighting passengers divided by the load speed, with about 1.75 x
+  capacity per stop on two-stop lines and 0.5 x capacity from six stops on
+  (measured). The load speed of a consist is the sum over its wagons, they
+  load in parallel.
+
+All constants were measured in-game (5700 terminal stops of 445 vehicles).
+The pure formulas live in `rate_model.lua` and are covered by
+`test/rate_model_test.lua` (`luajit test/rate_model_test.lua`), including a
+fixture of 79 real reference lines.
+
 ## Development
 
 ```
 kampfmoehre_rate_preview_1/        the mod (this is what gets published)
-  mod.json                         mod id
+  mod.json                         mod id, "rough estimate" parameter
   strings.json                     translations (en, de)
   _metadata/modinfo.json           name, summary, description (+ de)
   _metadata/0.png                  title image, 1920x1080
   content/gui/kampfmoehre_rate_preview/
     entry.res.lua                  plugin registration (entry point)
-    rate_preview.script.lua        the actual code
+    rate_preview.script.lua        the actual code (UI hooks, game API)
+    rate_model.lua                 pure formulas of the rough estimate
+test/rate_model_test.lua           unit tests for rate_model.lua (luajit)
+test/caldata_fixture.lua           79 real reference lines for the tests
 sync.sh                            copies the mod into the game's staging area
 ```
 
