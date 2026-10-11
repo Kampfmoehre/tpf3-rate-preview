@@ -3,7 +3,8 @@
 -- Shows the line's current rate and the estimated rate after the purchase /
 -- replacement / modification in the vehicle dialog:
 --  * in the bottom bar of the cart (next to the buy button), computed over the
---    whole cart: all entries, times the amount spin box;
+--    whole cart: all entries, times the amount spin box; when replacing in the
+--    cart entry itself (there is only one);
 --  * additionally in the detail panel on the right for single-vehicle
 --    carriers (road, water, air) when buying, where one list entry is the
 --    whole purchase.
@@ -25,14 +26,17 @@
 --    called per cart entry (VehicleCart) -> summed cart capacity.
 --  * builtin.DoubleSpinBox (min 1, max 99): the amount field of the bottom bar.
 --  * builtin.BoxLayout with meta.class "bottom-bar-layout": the cart's bottom
---    bar -> our text is inserted there.
+--    bar -> our text is inserted there (Buy, Modify). In Replace mode the bar
+--    is full (other mods append to its "Vehicles To Replace" widget); the text
+--    goes into the single cart entry instead, found as the builtin.BoxLayout
+--    holding the builtin.Button "consist-delete".
 --  * vehicle_store_util.makeVehicleData: registry of list vehicleData;
 --    makeVehicleProgressBarRow("Top Speed") / makeVehiclePropertyRow("Weight",
 --    "Length") identify the detail panel render and the shown vehicle; the
 --    second vertical builtin.BoxLayout of that render is its right column.
 
 function data()
-	local VERSION = "0.15.0"
+	local VERSION = "0.15.1"
 
 	local react = ug_require "::/gui/main/react.lua"
 	local builtin = ug_require "::/gui/main/builtin.lua"
@@ -1068,9 +1072,106 @@ function data()
 
 		-- 5) layout hooks
 		local origBox = builtin.BoxLayout
+
+		-- Our text block. TextView cannot wrap: a second line (reachable speed)
+		-- goes into a vertical layout, and the full text is the tooltip when
+		-- clipped. pad: spaces around the texts (the bottom bar has no spacing);
+		-- boxClass: always wrap in a vertical layout with this class.
+		local function makeRateNode(text, extra, extraReached, extraTooltip, pad, boxClass)
+			local node = builtin.TextView{
+				meta = { class = "font-scale-body" },
+				text = pad .. text .. pad,
+				tooltipWhenClipped = text,
+			}
+			local children = { node }
+			if type(extra) == "string" and extra ~= "" then
+				-- speed icon + text; when the top speed is reached between
+				-- the stops only the speed, green, with a check mark (the
+				-- full sentence is the tooltip)
+				local textClass = extraReached and "font-scale-body, success" or "font-scale-body"
+				local row = {
+					builtin.ImageView{
+						path = "::/gui/line_vehicle_mgmt/icons/symbol_speed.tga",
+						scaling = builtin.type.ImageViewScaling.AutoFit,
+					},
+					builtin.TextView{
+						meta = { class = textClass },
+						text = "  " .. extra .. "  ",
+						tooltipWhenClipped = extra,
+					},
+				}
+				if pad ~= "" then
+					table.insert(row, 1, builtin.TextView{ meta = { class = "font-scale-body" }, text = pad })
+				end
+				if extraReached then
+					row[#row + 1] = builtin.ImageView{
+						meta = { class = "success" },
+						path = "::/gui/entity_window/icons/circle_check.tga",
+						scaling = builtin.type.ImageViewScaling.AutoFit,
+					}
+				end
+				children[2] = builtin.Component{
+					meta = { tooltip = extraTooltip },
+					layout = origBox{ -- the unwrapped builtin: no re-entry into our hook
+						orientation = builtin.type.Orientation.Horizontal,
+						children = row,
+					},
+				}
+			end
+			if #children == 1 and not boxClass then
+				return node
+			end
+			return origBox{
+				meta = boxClass and { class = boxClass } or nil,
+				orientation = builtin.type.Orientation.Vertical,
+				children = children,
+			}
+		end
+
+		-- Replace mode: the cart has exactly one entry, and the bottom bar is
+		-- already filled by the "Vehicles To Replace" widget (other mods append
+		-- to it, e.g. Better Vehicle Stats' comparison). Our text goes into the
+		-- cart entry, left of its delete button.
+		local lastDeleteButton = nil -- delete button of the cart entry being rendered
+		local rateInCart = false     -- this render's text went into the cart entry
+
+		local origButton = builtin.Button
+		builtin.Button = function(...)
+			local node = origButton(...)
+			local params = lastArg(...)
+			if type(params) == "table" and params.meta and params.meta.class == "consist-delete" then
+				lastDeleteButton = node
+			end
+			return node
+		end
+
 		builtin.BoxLayout = function(...)
 			local params = lastArg(...)
 			if type(params) == "table" then
+				-- cart entry (Replace, see above): the layout
+				-- holding the vehicle scroll area and the delete button. At this point
+				-- the entry is still pending (it is committed by its summary table).
+				if lastDeleteButton ~= nil and type(params.children) == "table" then
+					local pos = nil
+					for i, child in ipairs(params.children) do
+						if child == lastDeleteButton then pos = i break end
+					end
+					if pos then
+						lastDeleteButton = nil
+						if ctx and ctx.mode == "Replace" and #cartEntries == 0 and pendingEntry ~= nil then
+							cartEntries = { pendingEntry }
+							local ok, text, extra, extraReached, extraTooltip = pcall(bottomBarText)
+							cartEntries = {}
+							if ok and text then
+								table.insert(params.children, pos,
+									makeRateNode(text, extra, extraReached, extraTooltip, "", "kampfmoehre-rate-cart"))
+								rateInCart = true
+							elseif not ok then
+								log.warning("[rate_preview] cart entry failed: " .. tostring(text))
+							end
+						end
+					end
+				end
 				-- cart bottom bar: insert before the stretch spacer (i.e. after the
 				-- select-all checkbox / "Vehicles To Replace" widget), else at the end
 				if params.meta and params.meta.class == "bottom-bar-layout" and type(params.children) == "table" then
@@ -1082,54 +1183,13 @@ function data()
 							tick:set(tick:old() + 1)
 						end, 3)
 					end)
-					local ok, text, extra, extraReached, extraTooltip = pcall(bottomBarText)
-					cartEntries, pendingEntry = {}, nil
+					local ok, text, extra, extraReached, extraTooltip = true, nil, nil, nil, nil
+					if not rateInCart then
+						ok, text, extra, extraReached, extraTooltip = pcall(bottomBarText)
+					end
+					cartEntries, pendingEntry, rateInCart, lastDeleteButton = {}, nil, false, nil
 					if ok and text then
-						-- TextView cannot wrap: a second line (reachable speed) goes into
-						-- a vertical layout, and the full text is the tooltip when clipped
-						local node = builtin.TextView{
-							meta = { class = "font-scale-body" },
-							text = "   " .. text .. "   ",
-							tooltipWhenClipped = text,
-						}
-						if type(extra) == "string" and extra ~= "" then
-							-- speed icon + text; when the top speed is reached between
-							-- the stops only the speed, green, with a check mark (the
-							-- full sentence is the tooltip)
-							local textClass = extraReached and "font-scale-body, success" or "font-scale-body"
-							local row = {
-								builtin.TextView{ meta = { class = "font-scale-body" }, text = "   " },
-								builtin.ImageView{
-									path = "::/gui/line_vehicle_mgmt/icons/symbol_speed.tga",
-									scaling = builtin.type.ImageViewScaling.AutoFit,
-								},
-								builtin.TextView{
-									meta = { class = textClass },
-									text = "  " .. extra .. "  ",
-									tooltipWhenClipped = extra,
-								},
-							}
-							if extraReached then
-								row[#row + 1] = builtin.ImageView{
-									meta = { class = "success" },
-									path = "::/gui/entity_window/icons/circle_check.tga",
-									scaling = builtin.type.ImageViewScaling.AutoFit,
-								}
-							end
-							node = origBox{ -- the unwrapped builtin: no re-entry into this hook
-								orientation = builtin.type.Orientation.Vertical,
-								children = {
-									node,
-									builtin.Component{
-										meta = { tooltip = extraTooltip },
-										layout = origBox{
-											orientation = builtin.type.Orientation.Horizontal,
-											children = row,
-										},
-									},
-								},
-							}
-						end
+						local node = makeRateNode(text, extra, extraReached, extraTooltip, "   ", nil)
 						local pos = #params.children + 1
 						for i, child in ipairs(params.children) do
 							if child == lastSpacer then pos = i break end

@@ -80,14 +80,19 @@ wrapping their fields affects the base scripts):
   are called once per cart entry → capacities per entry; `builtin.CheckBox`
   gives the entry's checkbox state, `builtin.DoubleSpinBox` the amount.
 - `builtin.BoxLayout` with class `bottom-bar-layout` is the cart's bottom
-  bar → the text is inserted in front of its stretch spacer.
+  bar → the text is inserted in front of its stretch spacer (Buy, Modify).
+- Replace: the bottom bar is already filled by the "Vehicles To Replace"
+  widget, which other mods extend (e.g. Better Vehicle Stats), so the text
+  goes into the single cart entry instead: the `builtin.BoxLayout` holding
+  the `builtin.Button` with class `consist-delete`, aligned bottom right by
+  `rate_preview.css.lua`.
 - Rate: `api.engine.util.line.calcLineStationThroughput`; capacities:
   `statistics_react_util.calculateCargoColumnDataForLine/-ForVehicle(...).demand`
   and `cargo_util.getSortedProducedCargoTypes` for the line's cargo types.
 
 ## Reachable speed between stops
 
-For land vehicles the bottom bar also shows `reaches ≈ 227 km/h` when the
+For land vehicles the preview also shows `reaches ≈ 227 km/h` when the
 consist cannot reach its top speed between the stops of the line (mod
 parameter, on by default). Per section (straight-line distance between
 consecutive stops, waypoints included) the largest speed is searched for
