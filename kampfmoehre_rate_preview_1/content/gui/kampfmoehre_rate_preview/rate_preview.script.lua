@@ -36,7 +36,7 @@
 --    second vertical builtin.BoxLayout of that render is its right column.
 
 function data()
-	local VERSION = "0.15.1"
+	local VERSION = "0.15.2"
 
 	local react = ug_require "::/gui/main/react.lua"
 	local builtin = ug_require "::/gui/main/builtin.lua"
@@ -172,24 +172,37 @@ function data()
 	-- Note: defined before the local `ctx` exists, so the line is passed in.
 	-- With `sections` (straight-line lengths between stops) and the new consist's
 	-- physics, reachable speeds on this line are compared instead of nominal ones.
-	local function speedHint(newSpeed, line, sections, newPhys)
-		if line == nil or type(newSpeed) ~= "number" or newSpeed <= 0 or newSpeed == math.huge then return "" end
+	-- Reference speed of the line's current vehicles: reachable over `sections`
+	-- if given, else nominal. Cached for 30 s per line, vehicle set and sections:
+	-- it builds the vehicle data of every vehicle on the line (12 trams = 12
+	-- collectVehicleData calls), and those do not change while the store is open.
+	local refSpeedCache, refSpeedCacheCount = {}, 0
+	local function cachedReferenceSpeed(line, sections)
+		local okV, vs = pcall(api.engine.system.transportVehicleSystem.getLineVehicles, line)
+		if not okV or type(vs) ~= "table" then return nil end
+		local key = tostring(line) .. "|" .. table.concat(vs, ",") .. "|" .. (sections and table.concat(sections, ",") or "-")
+		local cached = refSpeedCache[key]
+		if cached and cached.until_ > os.time() then return cached.value or nil end
 		local ref = nil
-		if sections and newPhys then
-			local reach = rate_model.reachableSpeedOnLine(sections, newPhys)
-			if reach then
-				newSpeed = reach
-				local okV, vs = pcall(api.engine.system.transportVehicleSystem.getLineVehicles, line)
-				if okV and type(vs) == "table" then
-					for _, v in ipairs(vs) do
-						local phys = vehiclePhysics(v)
-						local r = phys and rate_model.reachableSpeedOnLine(sections, phys) or vehicleTopSpeed(v)
-						if r and r > 0 and (ref == nil or r < ref) then ref = r end
-					end
-				end
+		if sections then
+			for _, v in ipairs(vs) do
+				local phys = vehiclePhysics(v)
+				local r = phys and rate_model.reachableSpeedOnLine(sections, phys) or vehicleTopSpeed(v)
+				if r and r > 0 and (ref == nil or r < ref) then ref = r end
 			end
 		end
 		ref = ref or lineReferenceSpeed(line)
+		if refSpeedCacheCount > 50 then refSpeedCache, refSpeedCacheCount = {}, 0 end
+		if cached == nil then refSpeedCacheCount = refSpeedCacheCount + 1 end
+		refSpeedCache[key] = { value = ref or false, until_ = os.time() + 30 }
+		return ref
+	end
+
+	local function speedHint(newSpeed, line, sections, newPhys)
+		if line == nil or type(newSpeed) ~= "number" or newSpeed <= 0 or newSpeed == math.huge then return "" end
+		local reach = (sections and newPhys) and rate_model.reachableSpeedOnLine(sections, newPhys) or nil
+		if reach then newSpeed = reach end
+		local ref = cachedReferenceSpeed(line, reach and sections or nil)
 		if not ref then return "" end
 		-- plain ASCII: the game font has no arrow glyphs
 		if newSpeed > ref * 1.02 then return " (+)" end
@@ -1011,6 +1024,29 @@ function data()
 			return _("Line rate") .. ": " .. text .. ((okH and hint) or ""), reachText, reachReached, reachTooltip
 		end
 
+		-- The cart re-renders every frame (VehicleCart's onStep transforms its
+		-- state each step), so bottomBarText's result is cached: recomputed at
+		-- once when the cart's inputs change, otherwise at most every 2 s so the
+		-- rate still follows the game (e.g. right after a purchase).
+		local barCache, barCacheCount = {}, 0
+		local function cachedBottomBarText()
+			if ctx == nil then return nil end
+			local parts = { tostring(ctx), tostring(cartAmount), tostring(lastShownVehicleData) }
+			for _, e in ipairs(cartEntries) do
+				parts[#parts + 1] = tostring(e.fingerprint) .. "/" .. tostring(e.checked) .. "/" .. tostring(e.cap) .. "/" .. tostring(e.speed)
+			end
+			local key = table.concat(parts, ";")
+			local cached = barCache[key]
+			if cached and cached.until_ > os.time() then
+				return cached.text, cached.extra, cached.extraReached, cached.extraTooltip
+			end
+			local text, extra, extraReached, extraTooltip = bottomBarText()
+			if barCacheCount > 20 then barCache, barCacheCount = {}, 0 end
+			if cached == nil then barCacheCount = barCacheCount + 1 end
+			barCache[key] = { text = text, extra = extra, extraReached = extraReached, extraTooltip = extraTooltip, until_ = os.time() + 2 }
+			return text, extra, extraReached, extraTooltip
+		end
+
 		-- the bar's stretch spacer sits right before the buy button; remember the
 		-- most recent spacer node so our text can be inserted in front of it
 		local lastSpacer = nil
@@ -1160,7 +1196,7 @@ function data()
 						lastDeleteButton = nil
 						if ctx and ctx.mode == "Replace" and #cartEntries == 0 and pendingEntry ~= nil then
 							cartEntries = { pendingEntry }
-							local ok, text, extra, extraReached, extraTooltip = pcall(bottomBarText)
+							local ok, text, extra, extraReached, extraTooltip = pcall(cachedBottomBarText)
 							cartEntries = {}
 							if ok and text then
 								table.insert(params.children, pos,
@@ -1185,7 +1221,7 @@ function data()
 					end)
 					local ok, text, extra, extraReached, extraTooltip = true, nil, nil, nil, nil
 					if not rateInCart then
-						ok, text, extra, extraReached, extraTooltip = pcall(bottomBarText)
+						ok, text, extra, extraReached, extraTooltip = pcall(cachedBottomBarText)
 					end
 					cartEntries, pendingEntry, rateInCart, lastDeleteButton = {}, nil, false, nil
 					if ok and text then
