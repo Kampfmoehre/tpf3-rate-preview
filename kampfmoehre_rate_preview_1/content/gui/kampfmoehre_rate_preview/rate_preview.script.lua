@@ -32,7 +32,7 @@
 --    second vertical builtin.BoxLayout of that render is its right column.
 
 function data()
-	local VERSION = "0.14.0"
+	local VERSION = "0.15.0"
 
 	local react = ug_require "::/gui/main/react.lua"
 	local builtin = ug_require "::/gui/main/builtin.lua"
@@ -113,6 +113,43 @@ function data()
 		return speed
 	end
 
+	-- Physics of a consist for rate_model.reachableSpeed from the store's
+	-- vehicleData (weight/payload in t, power kW, tractive effort kN) and the
+	-- parts list for the brake deceleration; nil for ships, aircraft, unknown.
+	local function physicsFromData(data, parts)
+		if type(data) ~= "table" or (data.tractiveEffort or 0) <= 0 or (data.power or 0) <= 0 then return nil end
+		local top = data.speedAdjusted
+		if type(top) ~= "number" or top == math.huge then top = data.speed end
+		if type(top) ~= "number" or top <= 0 or top == math.huge then return nil end
+		local brake = nil
+		pcall(function()
+			for _, v in ipairs(parts or {}) do
+				local b = v.landVehicle and v.landVehicle.brakeDeceleration
+				if type(b) == "number" and b > 0 and (brake == nil or b < brake) then brake = b end
+			end
+		end)
+		return {
+			weight = (data.weight or 0) + (data.weightMaxPayload or 0),
+			power = data.power,
+			tractiveEffort = data.tractiveEffort,
+			friction = data.rollingFriction or 0,
+			topSpeed = top,
+			brakeDecel = brake,
+		}
+	end
+
+	-- physics of an existing vehicle (incl. maintenance-adjusted top speed)
+	local function vehiclePhysics(vehicle)
+		local phys = nil
+		pcall(function()
+			local tv = api.engine.getComponent(vehicle, api.type.ComponentType.TRANSPORT_VEHICLE)
+			if not tv then return end
+			local vs = raw.makeParts({ tv.transportVehicleConfig.vehicles })
+			phys = physicsFromData(raw.collect(vs, tv.modifiers), vs)
+		end)
+		return phys
+	end
+
 	-- Reference speed of the line: the speed of its current vehicles (min),
 	-- i.e. what the current rate was measured with.
 	local function lineReferenceSpeed(line)
@@ -129,9 +166,26 @@ function data()
 	-- "(+)" if the new consist is faster than the line's current vehicles (the
 	-- estimate is then conservative), "(-)" if slower, "" if equal/unknown.
 	-- Note: defined before the local `ctx` exists, so the line is passed in.
-	local function speedHint(newSpeed, line)
+	-- With `sections` (straight-line lengths between stops) and the new consist's
+	-- physics, reachable speeds on this line are compared instead of nominal ones.
+	local function speedHint(newSpeed, line, sections, newPhys)
 		if line == nil or type(newSpeed) ~= "number" or newSpeed <= 0 or newSpeed == math.huge then return "" end
-		local ref = lineReferenceSpeed(line)
+		local ref = nil
+		if sections and newPhys then
+			local reach = rate_model.reachableSpeedOnLine(sections, newPhys)
+			if reach then
+				newSpeed = reach
+				local okV, vs = pcall(api.engine.system.transportVehicleSystem.getLineVehicles, line)
+				if okV and type(vs) == "table" then
+					for _, v in ipairs(vs) do
+						local phys = vehiclePhysics(v)
+						local r = phys and rate_model.reachableSpeedOnLine(sections, phys) or vehicleTopSpeed(v)
+						if r and r > 0 and (ref == nil or r < ref) then ref = r end
+					end
+				end
+			end
+		end
+		ref = ref or lineReferenceSpeed(line)
 		if not ref then return "" end
 		-- plain ASCII: the game font has no arrow glyphs
 		if newSpeed > ref * 1.02 then return " (+)" end
@@ -327,12 +381,20 @@ function data()
 	-- covered as far as the reference lines share them, hence "rough".
 	---------------------------------------------------------------------------
 	local roughEnabled = false
-	-- diagnostic log for the rough estimate, deduplicated per message
-	local lastRoughLog = nil
+	local reachableEnabled = true
+	-- diagnostic log for the rough estimate. The store re-renders the cart
+	-- about every frame, so each message is logged at most once per 10 s.
+	local roughLogged, roughLoggedCount = {}, 0
 	local function roughLog(msg)
 		msg = "[rate_preview] rough: " .. msg
-		if msg ~= lastRoughLog then
-			lastRoughLog = msg
+		local now = os.time()
+		local last = roughLogged[msg]
+		if last == nil or now - last >= 10 then
+			if roughLoggedCount > 200 then
+				roughLogged, roughLoggedCount = {}, 0
+			end
+			if last == nil then roughLoggedCount = roughLoggedCount + 1 end
+			roughLogged[msg] = now
 			log.message(msg)
 		end
 	end
@@ -352,8 +414,9 @@ function data()
 	-- straight-line round-trip length of a line in metres, or nil (< 2 stops)
 	-- Returns the straight-line round trip in metres (stops and waypoints in
 	-- line order, closed back to the first stop) and the number of stops.
-	local function lineStraightLength(line)
-		local points = {}
+	-- points of the line in order; stopAt[i] = index in points of stop i
+	local function linePoints(line)
+		local points, stopAt = {}, {}
 		local nStops = 0
 		local okL, errL = pcall(function()
 			local lc = api.engine.getComponent(line, api.type.ComponentType.LINE)
@@ -369,6 +432,7 @@ function data()
 				local c = entityCenter(target) or entityCenter(stop.stationGroup)
 				if c then points[#points + 1] = c end
 				nStops = nStops + 1
+				stopAt[nStops] = #points
 				-- waypoints after the stop: 3D position (ships, aircraft) or a lane position
 				for _, wp in ipairs(stop.waypoints or {}) do
 					pcall(function()
@@ -385,15 +449,48 @@ function data()
 			end
 		end)
 		if not okL then
-			roughLog("lineStraightLength(" .. tostring(line) .. ") failed: " .. tostring(errL))
+			roughLog("linePoints(" .. tostring(line) .. ") failed: " .. tostring(errL))
 		end
-		if #points < 2 then return nil end
+		return points, nStops, stopAt
+	end
+
+	-- straight-line lengths of the sections between consecutive stops (closed
+	-- round trip, waypoints included), or nil. Cached for 5 s per line: the
+	-- bottom bar is rebuilt about every frame.
+	local sectionsCache = {}
+	local computeSectionLengths
+	local function lineSectionLengths(line)
+		if line == nil then return nil end
+		local cached = sectionsCache[line]
+		if cached and cached.until_ > os.time() then return cached.value or nil end
+		local value = computeSectionLengths(line)
+		sectionsCache[line] = { value = value or false, until_ = os.time() + 5 }
+		return value
+	end
+
+	computeSectionLengths = function(line)
+		local points, nStops, stopAt = linePoints(line)
+		if #points < 2 or nStops < 1 then return nil end
+		local sections = {}
+		for i = 1, nStops do
+			local from, to = stopAt[i], stopAt[(i % nStops) + 1]
+			local len, j = 0, from
+			while j ~= to do
+				local nxt = (j % #points) + 1
+				len = len + api.type.Vec3f.distance(points[j], points[nxt])
+				j = nxt
+			end
+			sections[i] = len
+		end
+		return sections
+	end
+
+	local function lineStraightLength(line)
+		local sections = lineSectionLengths(line)
+		if sections == nil then return nil end
 		local total = 0
-		for i = 1, #points do
-			local a, b = points[i], points[(i % #points) + 1]
-			total = total + api.type.Vec3f.distance(a, b)
-		end
-		return total, nStops
+		for _, len in ipairs(sections) do total = total + len end
+		return total, #sections
 	end
 
 	-- Pure travel time of one round trip in seconds, from the engine's per-section
@@ -748,6 +845,7 @@ function data()
 					speed = (type(result) == "table" and result.speed) or nil,
 					cap = (type(result) == "table" and result.totalCapacity) or 0,
 					loadingSpeed = consistLoadSpeed(vehicles) or (type(result) == "table" and result.loadingSpeed) or nil,
+					phys = physicsFromData(result, vehicles),
 					capCargo = (type(result) == "table" and result.totalCapacityCargo) or 0,
 					allCargoTypes = (type(result) == "table" and result.allCargoTypes) or nil,
 					fingerprint = cartPartsFingerprint,
@@ -830,12 +928,44 @@ function data()
 			end
 			local newConsist = { kind = newKind, loadSpeed = newLoadSpeed, cargoClasses = newConsistCargoClasses(kind, newCaps),
 				vehicles = (ctx.mode == "Replace") and ctx.replaceCount or math.max(1, cartAmount or 1) }
+			-- reachable speed between the stops of this line (land vehicles): the
+			-- cart's consists; in Buy mode of single-vehicle carriers the shown vehicle
+			local sections, newPhys = nil, nil
+			local reachText, reachReached, reachTooltip = "", false, nil
+			if reachableEnabled then
+				for _, e in ipairs(cartEntries) do
+					if e.phys and (newPhys == nil or e.phys.topSpeed < newPhys.topSpeed) then newPhys = e.phys end
+				end
+				if newPhys == nil and ctx.mode == "Buy" and #cartEntries == 0
+					and not vehicle_store_util.acceptsMultiVehicle(ctx.carrier) and lastShownVehicleData then
+					newPhys = physicsFromData(lastShownVehicleData, nil)
+				end
+				if newPhys then
+					sections = lineSectionLengths(ctx.line)
+					local reach = sections and rate_model.reachableSpeedOnLine(sections, newPhys) or nil
+					local secText = {}
+					for i, l in ipairs(sections or {}) do secText[i] = string.format("%.0f", l) end
+					roughLog(string.format("reach line %s: sections=[%s] weight=%.1f t power=%.0f kW tractive=%.0f kN friction=%.3f top=%.1f brake=%s -> %s",
+						tostring(ctx.line), table.concat(secText, ","), newPhys.weight, newPhys.power, newPhys.tractiveEffort,
+						newPhys.friction or 0, newPhys.topSpeed * 3.6, tostring(newPhys.brakeDecel), reach and string.format("%.1f km/h", reach * 3.6) or "nil"))
+					if reach and reach < 0.98 * newPhys.topSpeed then
+						local okF, sp = pcall(api.util.formatSpeed, reach)
+						reachText = _("rate_reaches") .. " ≈ " .. ((okF and sp) or string.format("%.0f km/h", reach * 3.6))
+					elseif reach then
+						-- shown too, so the feature visibly did its check
+						local okF, sp = pcall(api.util.formatSpeed, newPhys.topSpeed)
+						reachText = (okF and sp) or string.format("%.0f km/h", newPhys.topSpeed * 3.6)
+						reachTooltip = _("rate_reaches_top") .. " (" .. reachText .. ")"
+						reachReached = true
+					end
+				end
+			end
 			-- Modify starts with the current consists -> estimate only after an edit.
 			-- Replace starts with the first list entry, so every selection counts.
 			if ctx.mode == "Modify" and #cartEntries > 0 and not cartEdited() then
 				local stats = lineStats(ctx.line)
 				if stats == nil or stats.rate <= 0 then return nil end
-				return _("Line rate") .. ": " .. formatInt(stats.rate)
+				return _("Line rate") .. ": " .. formatInt(stats.rate), reachText, reachReached, reachTooltip
 			end
 			local text
 			if ctx.mode == "Modify" then
@@ -848,6 +978,8 @@ function data()
 						oldCap = oldCap + ((ctx.oldCaps and ctx.oldCaps[i]) or 0)
 					end
 				end
+				-- an emptied consist (no capacity, e.g. no engine) is nothing to estimate
+				if newCap <= 0 then return nil end
 				text = rateText(newCap, oldCap)
 			else
 				local baseCap = nil
@@ -870,8 +1002,9 @@ function data()
 				end
 			end
 			if text == nil then return nil end
-			local okH, hint = pcall(speedHint, newSpeed, ctx.line)
-			return _("Line rate") .. ": " .. text .. ((okH and hint) or "")
+			local okH, hint = pcall(speedHint, newSpeed, ctx.line, sections, newPhys)
+			-- second value: extra line below (reachable speed), "" if none
+			return _("Line rate") .. ": " .. text .. ((okH and hint) or ""), reachText, reachReached, reachTooltip
 		end
 
 		-- the bar's stretch spacer sits right before the buy button; remember the
@@ -949,13 +1082,54 @@ function data()
 							tick:set(tick:old() + 1)
 						end, 3)
 					end)
-					local ok, text = pcall(bottomBarText)
+					local ok, text, extra, extraReached, extraTooltip = pcall(bottomBarText)
 					cartEntries, pendingEntry = {}, nil
 					if ok and text then
+						-- TextView cannot wrap: a second line (reachable speed) goes into
+						-- a vertical layout, and the full text is the tooltip when clipped
 						local node = builtin.TextView{
 							meta = { class = "font-scale-body" },
 							text = "   " .. text .. "   ",
+							tooltipWhenClipped = text,
 						}
+						if type(extra) == "string" and extra ~= "" then
+							-- speed icon + text; when the top speed is reached between
+							-- the stops only the speed, green, with a check mark (the
+							-- full sentence is the tooltip)
+							local textClass = extraReached and "font-scale-body, success" or "font-scale-body"
+							local row = {
+								builtin.TextView{ meta = { class = "font-scale-body" }, text = "   " },
+								builtin.ImageView{
+									path = "::/gui/line_vehicle_mgmt/icons/symbol_speed.tga",
+									scaling = builtin.type.ImageViewScaling.AutoFit,
+								},
+								builtin.TextView{
+									meta = { class = textClass },
+									text = "  " .. extra .. "  ",
+									tooltipWhenClipped = extra,
+								},
+							}
+							if extraReached then
+								row[#row + 1] = builtin.ImageView{
+									meta = { class = "success" },
+									path = "::/gui/entity_window/icons/circle_check.tga",
+									scaling = builtin.type.ImageViewScaling.AutoFit,
+								}
+							end
+							node = origBox{ -- the unwrapped builtin: no re-entry into this hook
+								orientation = builtin.type.Orientation.Vertical,
+								children = {
+									node,
+									builtin.Component{
+										meta = { tooltip = extraTooltip },
+										layout = origBox{
+											orientation = builtin.type.Orientation.Horizontal,
+											children = row,
+										},
+									},
+								},
+							}
+						end
 						local pos = #params.children + 1
 						for i, child in ipairs(params.children) do
 							if child == lastSpacer then pos = i break end
@@ -989,10 +1163,13 @@ function data()
 			react.onMount(function()
 				roughEnabled = false
 				calibCache = {}
+				sectionsCache = {}
 				local ok, all = pcall(api.engine.config.getModParams)
 				local mine = ok and type(all) == "table" and all["kampfmoehre_rate_preview_1"] or nil
 				if type(mine) == "table" and mine.roughEstimate == 2 then roughEnabled = true end
-				log.message("[rate_preview] rough estimate for empty lines: " .. tostring(roughEnabled))
+				reachableEnabled = not (type(mine) == "table" and mine.reachableSpeed == 1)
+				log.message("[rate_preview] rough estimate for empty lines: " .. tostring(roughEnabled)
+					.. ", reachable speed: " .. tostring(reachableEnabled))
 			end)
 			return builtin.BoxLayout{ children = {} }
 		end)

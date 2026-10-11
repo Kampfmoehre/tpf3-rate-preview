@@ -7,7 +7,11 @@
         "rate_rough_param_name": "Rough estimate for empty lines",
         "rate_rough_param_tooltip": "For a line without vehicles, estimate the rate from the straight-line distance between its stops plus the loading time at each stop, calibrated on your other lines of the same carrier and cargo kind. Typical deviation 10-20 %, single lines 30 % and more. The game's own rate right after the purchase is provisional until the vehicle completed a full round trip.",
         "rate_param_off": "Off",
-        "rate_param_on": "On"
+        "rate_param_on": "On",
+        "rate_reaches": "reaches",
+        "rate_reach_param_name": "Reachable speed between stops",
+        "rate_reach_param_tooltip": "Shows the top speed a land vehicle can actually reach between the stops of the line (straight-line distance, acceleration from power, tractive effort and the fully loaded weight, braking to a stop), if it stays below the vehicle's top speed, otherwise a green check mark. A partly empty vehicle reaches more. The (+)/(-) hint then compares reachable instead of nominal speeds.",
+        "rate_reaches_top": "reaches top speed"
     },
     "de": {
         "Line rate": "Linienrate",
@@ -17,6 +21,10 @@
         "rate_rough_param_name": "Grobe Schätzung für leere Linien",
         "rate_rough_param_tooltip": "Schätzt für eine Linie ohne Fahrzeuge die Rate aus der Luftlinie zwischen ihren Haltestellen plus der Ladezeit an jedem Halt, kalibriert an deinen anderen Linien desselben Verkehrsmittels und derselben Frachtart. Typische Abweichung 10 bis 20 %, einzelne Linien 30 % und mehr. Die Rate des Spiels direkt nach dem Kauf ist vorläufig, bis das Fahrzeug eine volle Runde gefahren ist.",
         "rate_param_off": "Aus",
-        "rate_param_on": "An"
+        "rate_param_on": "An",
+        "rate_reaches": "erreicht",
+        "rate_reach_param_name": "Erreichbares Tempo zwischen den Halten",
+        "rate_reach_param_tooltip": "Zeigt die Geschwindigkeit, die ein Landfahrzeug zwischen den Halten der Linie tatsächlich erreicht (Luftlinie, Beschleunigung aus Leistung, Zugkraft und voll beladenem Gewicht, Bremsen bis zum Stillstand), falls sie unter der Höchstgeschwindigkeit bleibt, sonst einen grünen Haken. Ein teilweise leeres Fahrzeug erreicht mehr. Der (+)/(-)-Hinweis vergleicht dann erreichbare statt nominelle Tempi.",
+        "rate_reaches_top": "erreicht Höchstgeschwindigkeit"
     }
 }

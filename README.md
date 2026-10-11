@@ -12,6 +12,9 @@ frequency estimate is shown when buying (cycle time divided by the new number
 of vehicles); replacing or modifying does not change the vehicle count.
 
 - Works for all carriers: road, rail, tram, water, air.
+- Shows the speed a land vehicle can actually reach between the line's stops
+  when that is below its top speed, otherwise a green check mark (see
+  "Reachable speed between stops").
 - Buy: the configured vehicle or consist times the amount field.
 - Replace: the replaced vehicles' capacity is swapped for the new consist.
 - Modify: only the checked entries count; the estimate appears once you
@@ -81,6 +84,30 @@ wrapping their fields affects the base scripts):
 - Rate: `api.engine.util.line.calcLineStationThroughput`; capacities:
   `statistics_react_util.calculateCargoColumnDataForLine/-ForVehicle(...).demand`
   and `cargo_util.getSortedProducedCargoTypes` for the line's cargo types.
+
+## Reachable speed between stops
+
+For land vehicles the bottom bar also shows `reaches ≈ 227 km/h` when the
+consist cannot reach its top speed between the stops of the line (mod
+parameter, on by default). Per section (straight-line distance between
+consecutive stops, waypoints included) the largest speed is searched for
+which the acceleration distance plus the braking distance fit into the
+section; the maximum over all sections is shown. Acceleration uses the
+game's own tooltip physics: pull `min(tractive effort, power / v)` minus
+rolling friction, divided by the full weight (empty + max payload); braking
+with the parts' `brakeDeceleration` (2.5 m/s² for most vehicles). Below
+98 % of the top speed the line shows `reaches ≈ X`, otherwise
+the top speed in green with a check mark (tooltip `reaches top speed (X)`),
+so the check is visible either way. The (+)/(-) hint
+when replacing then compares reachable instead of nominal speeds.
+
+The weight is the fully loaded one, as in the game's own performance
+rating; the game simulates the payload, and a fully loaded Avelia Liberty is
+about 500 t instead of 410 t empty. A partly empty vehicle accelerates better
+and reaches more (measured: 227 km/h at 32 % load where the model says 200 km/h
+for a full train on a 4 km section). Real tracks are longer than the straight
+line, which also helps, while lower track speed limits and uphill sections
+are not considered. Ships and aircraft are not covered.
 
 ## How the rough estimate works
 

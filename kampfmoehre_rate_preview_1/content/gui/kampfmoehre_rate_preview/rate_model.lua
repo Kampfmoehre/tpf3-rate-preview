@@ -186,4 +186,93 @@ function M.rate(capacity, k, cycleSeconds)
 	return capacity * k / cycleSeconds
 end
 
+---------------------------------------------------------------------------
+-- Reachable speed between stops (land vehicles).
+-- The game's own tooltip physics (vehicle_util.getPowerRatingTextAndToolTip):
+-- pull F(v) = min(tractiveEffort, power / v), acceleration a(v) =
+-- (F(v) - resistance) / weight with tractiveEffort in kN, power in kW, weight
+-- in t (incl. full payload), v in m/s; on the flat resistance = rolling
+-- friction. Braking is uniform (brakeDeceleration, m/s^2). A section of
+-- length d allows the largest v <= topSpeed with accelDistance(v) +
+-- v^2 / (2 b) <= d.
+-- phys = { weight, power, tractiveEffort, friction, topSpeed, brakeDecel }
+---------------------------------------------------------------------------
+M.ACCEL_INTEGRATION_STEPS = 200
+M.DEFAULT_BRAKE_DECEL = 2.5
+
+local function pull(phys, v)
+	if v <= 0 then return phys.tractiveEffort end
+	return math.min(phys.tractiveEffort, phys.power / v)
+end
+
+-- true if the consist can accelerate at all on the flat
+local function physValid(phys)
+	return type(phys) == "table" and (phys.weight or 0) > 0 and (phys.power or 0) > 0
+		and (phys.tractiveEffort or 0) > 0 and (phys.topSpeed or 0) > 0
+		and phys.tractiveEffort > (phys.friction or 0)
+end
+
+-- distance (m) and time (s) to accelerate from standstill to v on the flat; nil if impossible
+function M.accelDistanceTime(phys, v)
+	if not physValid(phys) or v <= 0 then return nil end
+	local friction = phys.friction or 0
+	local function invA(u) -- weight / (F(u) - friction) = 1 / a(u)
+		local f = pull(phys, u) - friction
+		if f <= 0 then return nil end
+		return phys.weight / f
+	end
+	-- Simpson's rule, split at the kink v_t = power / tractiveEffort
+	local function simpson(a, b, fn)
+		local n = M.ACCEL_INTEGRATION_STEPS
+		local h = (b - a) / n
+		local sum = 0
+		for i = 0, n do
+			local x = a + i * h
+			local y = fn(x)
+			if y == nil then return nil end
+			local w = (i == 0 or i == n) and 1 or ((i % 2 == 1) and 4 or 2)
+			sum = sum + w * y
+		end
+		return sum * h / 3
+	end
+	local vt = phys.power / phys.tractiveEffort
+	local dist, time = 0, 0
+	local segments = (vt > 0 and vt < v) and { { 0, vt }, { vt, v } } or { { 0, v } }
+	for _, seg in ipairs(segments) do
+		local t = simpson(seg[1], seg[2], invA)
+		local d = simpson(seg[1], seg[2], function(u) local i = invA(u) return i and u * i or nil end)
+		if t == nil or d == nil then return nil end
+		dist, time = dist + d, time + t
+	end
+	return dist, time
+end
+
+-- largest speed (m/s) reachable on a section of `lengthMetres` incl. braking to a stop
+function M.reachableSpeed(lengthMetres, phys)
+	if not physValid(phys) or not lengthMetres or lengthMetres <= 0 then return nil end
+	local b = (phys.brakeDecel and phys.brakeDecel > 0) and phys.brakeDecel or M.DEFAULT_BRAKE_DECEL
+	local function fits(v)
+		local d = M.accelDistanceTime(phys, v)
+		return d ~= nil and d + v * v / (2 * b) <= lengthMetres
+	end
+	local top = phys.topSpeed
+	if fits(top) then return top end
+	local lo, hi = 0, top
+	for _ = 1, 30 do
+		local mid = (lo + hi) / 2
+		if fits(mid) then lo = mid else hi = mid end
+	end
+	return lo
+end
+
+-- max reachable speed over a list of section lengths, nil if unknown
+function M.reachableSpeedOnLine(sectionLengths, phys)
+	local best = nil
+	for _, len in ipairs(sectionLengths or {}) do
+		local v = M.reachableSpeed(len, phys)
+		if v and (best == nil or v > best) then best = v end
+	end
+	return best
+end
+
 return M

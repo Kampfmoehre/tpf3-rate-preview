@@ -119,6 +119,33 @@ near("rate from k", M.rate(40, 1459, 671), 87, 0.1)
 -- Linie 4 (bus, 2 stops): rate 68 at 7:11 with 20 seats
 near("rate bus", M.rate(20, 1465, 431), 68, 0.1)
 
+-- reachable speed physics
+-- Avelia Liberty: 410 t + payload, 9280 kW, 400 kN, 260 km/h, 7 parts x 0.02 friction
+local avelia = { weight = 417, power = 9280, tractiveEffort = 400, friction = 0.14, topSpeed = 260 / 3.6, brakeDecel = 2.5 }
+local d, tt = M.accelDistanceTime(avelia, avelia.topSpeed)
+-- analytic: m vt^2 / (2F) + (m/P)(v^3 - vt^3)/3 with vt = P/F = 23.2 m/s  -> ~5.7 km, ~130 s
+near("avelia accel distance", d, 5730, 60)
+near("avelia accel time", tt, 129, 2)
+-- 4 km between stops: measured in-game 227 km/h (Top Speed Reached)
+local v4 = M.reachableSpeed(4000, avelia)
+near("avelia reachable on 4 km (km/h)", v4 * 3.6, 220, 12)
+near("avelia reaches top on 8 km", M.reachableSpeed(8000, avelia) * 3.6, 260, 0.01)
+near("avelia on 500 m", M.reachableSpeed(500, avelia) * 3.6, 95, 15)
+-- bus: 70 km/h reached easily within 300 m
+local bus = { weight = 16, power = 150, tractiveEffort = 30, friction = 0.02, topSpeed = 70 / 3.6, brakeDecel = 2.5 }
+near("bus reaches top on 400 m", M.reachableSpeed(400, bus) * 3.6, 70, 0.01)
+near("bus on 300 m (accel 262 m + brake 75 m)", M.reachableSpeed(300, bus) * 3.6, 67, 1)
+near("line max over sections", M.reachableSpeedOnLine({ 500, 4000, 1000 }, avelia), v4, 0.01)
+assert(M.reachableSpeed(4000, { weight = 100, power = 0, tractiveEffort = 100, topSpeed = 50 }) == nil, "no power -> nil")
+assert(M.reachableSpeed(4000, { weight = 100, power = 500, tractiveEffort = 1, friction = 2, topSpeed = 50 }) == nil, "friction > pull -> nil")
+assert(M.reachableSpeedOnLine({}, avelia) == nil, "no sections -> nil")
+-- heavy freight train: 2000 t, 3000 kW, 250 kN, 100 km/h
+local freight = { weight = 2000, power = 3000, tractiveEffort = 250, friction = 0.5, topSpeed = 100 / 3.6, brakeDecel = 2.5 }
+local df = M.accelDistanceTime(freight, freight.topSpeed)
+-- analytic: 2000*12^2/(2*250) + (2000/3000)*(27.8^3 - 12^3)/3 = 4967 m
+near("freight accel distance ~ 5.0 km", df, 4967, 40)
+near("freight on 2 km (km/h)", M.reachableSpeed(2000, freight) * 3.6, 70, 10)
+
 if failures > 0 then
 	print(failures .. " failure(s)")
 	os.exit(1)

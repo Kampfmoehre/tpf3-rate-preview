@@ -15,6 +15,17 @@
                 "rate_param_off",
                 "rate_param_on"
             ]
+        },
+        {
+            "defaultIndex": 1,
+            "key": "reachableSpeed",
+            "name": "rate_reach_param_name",
+            "tooltip": "rate_reach_param_tooltip",
+            "uiType": "Button",
+            "values": [
+                "rate_param_off",
+                "rate_param_on"
+            ]
         }
     ],
     "postRunScript": {
@@ -23,7 +34,7 @@
     "preRunScript": {
         "fileName": ""
     },
-    "revision": 4,
+    "revision": 5,
     "runScript": {
         "fileName": ""
     },
