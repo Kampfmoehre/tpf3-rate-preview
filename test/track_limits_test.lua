@@ -138,6 +138,35 @@ world[1].edges = edges(120, 1000) -- track upgraded
 c:step(list, vehicleLine, 100 + M.MAX_AGE + M.STEP_INTERVAL)
 near("stale section is re-read", (c:lineTrackMax(10)), 120 * kmh)
 
+-- opening a window (want after a pause) re-reads its line once
+local function countOf(list, v)
+	local n = 0
+	for __, x in ipairs(list) do if x == v then n = n + 1 end end
+	return n
+end
+world[2].edges = edges(80, 500)
+reads = {}
+c = M.new(fakeAdapter(world, { [10] = 3, [20] = 2 }, reads))
+c:step(list, vehicleLine, 100)
+world[2].edges = edges(160, 500) -- track upgraded right after the first read
+c:want(10, 110)
+near("old value stays visible until re-read", (c:section(10, 1) or {}).maxLimit, 80 * kmh)
+max, known = c:lineTrackMax(10)
+check("stale sections still count as known", known == 2, tostring(known))
+c:step(list, vehicleLine, 110)
+near("opened window re-reads its line", (c:section(10, 1) or {}).maxLimit, 160 * kmh)
+check("other lines are not re-read", countOf(reads, 5) == 1, "reads of vehicle 5=" .. countOf(reads, 5))
+local before = #reads
+c:want(10, 110 + M.WANT_SECONDS)
+c:step(list, vehicleLine, 110 + M.WANT_SECONDS)
+check("a window that stays open does not re-read", #reads == before, "reads=" .. #reads - before)
+c:want(10, 110 + 3 * M.WANT_SECONDS)
+c:step(list, vehicleLine, 110 + 3 * M.WANT_SECONDS)
+check("reopening after a pause re-reads again", #reads == before + 2, "reads=" .. #reads - before)
+c = M.new(fakeAdapter(world, { [10] = 3, [20] = 2 }, {}))
+c:want(10, 100)
+check("want for an unknown line is harmless", c:lineTrackMax(10) == nil)
+
 -- line changed its number of stops: old sections are dropped
 reads = {}
 c = M.new(fakeAdapter(world, { [10] = 3, [20] = 2 }, reads))

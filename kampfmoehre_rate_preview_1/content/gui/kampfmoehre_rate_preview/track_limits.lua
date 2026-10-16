@@ -11,7 +11,9 @@
 -- it reads until TIME_BUDGET is used up (at least one, at most
 -- MAX_SECTIONS_PER_STEP sections): most sections cost 0.2-4 ms, one long
 -- section (400+ edges) up to ~40 ms. Lines with an open window (want()) go
--- first. Lines without vehicles have no data.
+-- first; opening a window (a want() after a pause) re-reads its line once, so
+-- a track upgrade shows without waiting MAX_AGE. Lines without vehicles have
+-- no data.
 --
 -- Shared instance: Top Speed Reached and Line Rate Preview each ship a copy of
 -- this file and use the collector stored as field SHARED_KEY of the builtin
@@ -25,7 +27,7 @@
 -- luajit (see test/track_limits_test.lua).
 local M = {}
 
-M.API_VERSION = 1
+M.API_VERSION = 2          -- 2: want() after a pause re-reads the line
 M.SHARED_KEY = "kampfmoehre_track_limits"
 M.STEP_INTERVAL = 1.5        -- seconds (os.time resolution); callers step about every 2 s
 M.MAX_SECTIONS_PER_STEP = 4
@@ -96,15 +98,23 @@ function M.new(adapter)
 end
 
 function Collector:reset()
-	self.lines = {}   -- line -> { stops = n, sections = { [stopIndex] = { length, maxLimit, at } } }
+	self.lines = {}   -- line -> { stops = n, staleBefore = t?, sections = { [stopIndex] = { length, maxLimit, at } } }
 	self.lastStep = nil
 	self.warned = {}
 	self.wanted = {}  -- line -> time of the last want()
 end
 
--- a window shows this line: read its sections first for WANT_SECONDS
+-- a window shows this line: read its sections first for WANT_SECONDS. A want
+-- after a pause (the window was just opened) also marks the line's known
+-- sections stale; their old values stay visible until they are re-read.
 function Collector:want(line, now)
-	if line then self.wanted[line] = now end
+	if not line then return end
+	local last = self.wanted[line]
+	if last == nil or now - last > M.WANT_SECONDS then
+		local L = self.lines[line]
+		if L then L.staleBefore = now end
+	end
+	self.wanted[line] = now
 end
 
 function Collector:call(name, ...)
@@ -117,12 +127,18 @@ function Collector:call(name, ...)
 	return nil
 end
 
+-- section s of line L must be read again: too old, or read before the line's
+-- window was opened
+local function stale(L, s, now)
+	return now - s.at >= M.MAX_AGE or (L.staleBefore ~= nil and s.at < L.staleBefore)
+end
+
 -- true if every section of the line is known and fresh
 local function complete(L, now)
 	if not L or not L.stops then return false end
 	local n = 0
 	for __, s in pairs(L.sections) do
-		if now - s.at >= M.MAX_AGE then return false end
+		if stale(L, s, now) then return false end
 		n = n + 1
 	end
 	return n >= L.stops
@@ -154,7 +170,7 @@ function Collector:step(vehicles, vehicleLine, now)
 		local enRoute, idx = self:call("vehicleSection", v)
 		local key = tostring(line) .. "|" .. tostring(idx)
 		local s = L and L.sections[idx]
-		if not (enRoute and idx and not tried[key] and (s == nil or now - s.at >= M.MAX_AGE)) then return false end
+		if not (enRoute and idx and not tried[key] and (s == nil or stale(L, s, now))) then return false end
 		tried[key] = true
 		local t0 = clock()
 		local sum = M.summarize(self:call("pathEdges", v))

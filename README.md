@@ -115,7 +115,9 @@ a section uses its real length, and the reachable speed is capped at the
 highest limit that holds for 200 m at a stretch (tooltip "Limited by the
 track …" when the cap decides). Sections no vehicle has driven since loading
 keep the straight-line distance. The collector reads about 3 ms every 2 s,
-open line/vehicle windows and the line in the store first, and runs only
+open line/vehicle windows and the line in the store first (opening the store
+or a window re-reads that line's sections, so a track upgrade shows within
+seconds; otherwise a section is read again after 5 minutes), and runs only
 while this parameter is on; with both mods loaded each section is read once.
 
 The weight is the fully loaded one, as in the game's own performance
