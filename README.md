@@ -106,13 +106,25 @@ the top speed in green with a check mark (tooltip `reaches top speed (X)`),
 so the check is visible either way. The (+)/(-) hint
 when replacing then compares reachable instead of nominal speeds.
 
+For lines with vehicles the real track is used where it is known: a
+background collector (`track_limits.lua`, shared with the mod Top Speed
+Reached) reads the section a vehicle is driving from its `MOVE_PATH`
+component, i.e. the edges from the previous stop to the next, and the edges'
+`speedLimit`/`curveSpeedLimit` from the `TRANSPORT_NETWORK` components. Such
+a section uses its real length, and the reachable speed is capped at the
+highest limit that holds for 200 m at a stretch (tooltip "Limited by the
+track …" when the cap decides). Sections no vehicle has driven since loading
+keep the straight-line distance. The collector reads about 3 ms every 2 s,
+open line/vehicle windows and the line in the store first, and runs only
+while this parameter is on; with both mods loaded each section is read once.
+
 The weight is the fully loaded one, as in the game's own performance
 rating; the game simulates the payload, and a fully loaded Avelia Liberty is
 about 500 t instead of 410 t empty. A partly empty vehicle accelerates better
 and reaches more (measured: 227 km/h at 32 % load where the model says 200 km/h
-for a full train on a 4 km section). Real tracks are longer than the straight
-line, which also helps, while lower track speed limits and uphill sections
-are not considered. Ships and aircraft are not covered.
+for a full train on a 4 km section). Uphill sections are not considered, and
+a section counts its highest limit only, not slower stretches in between.
+Ships and aircraft are not covered.
 
 ## How the rough estimate works
 
@@ -157,7 +169,7 @@ fixture of 79 real reference lines.
 
 ```
 kampfmoehre_rate_preview_1/        the mod (this is what gets published)
-  mod.json                         mod id, "rough estimate" parameter
+  mod.json                         mod id, "rough estimate" and "reachable speed" parameters
   strings.json                     translations (en, de)
   _metadata/modinfo.json           name, summary, description (+ de)
   _metadata/0.png                  title image, 1920x1080
@@ -165,7 +177,9 @@ kampfmoehre_rate_preview_1/        the mod (this is what gets published)
     entry.res.lua                  plugin registration (entry point)
     rate_preview.script.lua        the actual code (UI hooks, game API)
     rate_model.lua                 pure formulas of the rough estimate
+    track_limits.lua               track speed limits per line section (same file as in Top Speed Reached)
 test/rate_model_test.lua           unit tests for rate_model.lua (luajit)
+test/track_limits_test.lua         unit tests for track_limits.lua (luajit)
 test/caldata_fixture.lua           79 real reference lines for the tests
 sync.sh                            copies the mod into the game's staging area
 ```
@@ -179,7 +193,7 @@ Workflow:
    the savegame is enough to pick up changes, no restart needed.
 3. Lua errors show up as a red error screen in the game ("Copy to clipboard")
    and in `.../3493540/local/crash_dump/stdout.txt`. The script logs with the
-   prefix `[rate_preview]`. The game's Lua is 5.1-compatible; check syntax
+   prefix `[kampfmoehre_rate_preview]`. The game's Lua is 5.1-compatible; check syntax
    with `luajit -bl file.lua`, not `luac` 5.4.
 4. Before uploading a new version through the in-game Mod-Hub, increase
    `revision` in `mod.json`. mod.io rejects a package whose content is

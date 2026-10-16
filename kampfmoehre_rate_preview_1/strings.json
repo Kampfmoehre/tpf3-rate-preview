@@ -10,8 +10,9 @@
         "rate_param_on": "On",
         "rate_reaches": "reaches",
         "rate_reach_param_name": "Reachable speed between stops",
-        "rate_reach_param_tooltip": "Shows the top speed a land vehicle can actually reach between the stops of the line (straight-line distance, acceleration from power, tractive effort and the fully loaded weight, braking to a stop), if it stays below the vehicle's top speed, otherwise a green check mark. A partly empty vehicle reaches more. The (+)/(-) hint then compares reachable instead of nominal speeds.",
-        "rate_reaches_top": "reaches top speed"
+        "rate_reach_param_tooltip": "Shows the top speed a land vehicle can actually reach between the stops of the line (acceleration from power, tractive effort and the fully loaded weight, braking to a stop), if it stays below the vehicle's top speed, otherwise a green check mark. For lines with vehicles the sections they have driven since loading use the real track length and speed limit, the others the straight-line distance. A partly empty vehicle reaches more. The (+)/(-) hint then compares reachable instead of nominal speeds. Off also stops reading the track.",
+        "rate_reaches_top": "reaches top speed",
+        "rate_reach_track_tooltip": "Limited by the track: highest speed limit that holds for 200 m at a stretch ({speed}); {known} of {total} sections known, the others use the straight-line distance."
     },
     "de": {
         "Line rate": "Linienrate",
@@ -24,7 +25,8 @@
         "rate_param_on": "An",
         "rate_reaches": "erreicht",
         "rate_reach_param_name": "Erreichbares Tempo zwischen den Halten",
-        "rate_reach_param_tooltip": "Zeigt die Geschwindigkeit, die ein Landfahrzeug zwischen den Halten der Linie tatsächlich erreicht (Luftlinie, Beschleunigung aus Leistung, Zugkraft und voll beladenem Gewicht, Bremsen bis zum Stillstand), falls sie unter der Höchstgeschwindigkeit bleibt, sonst einen grünen Haken. Ein teilweise leeres Fahrzeug erreicht mehr. Der (+)/(-)-Hinweis vergleicht dann erreichbare statt nominelle Tempi.",
-        "rate_reaches_top": "erreicht Höchstgeschwindigkeit"
+        "rate_reach_param_tooltip": "Zeigt die Geschwindigkeit, die ein Landfahrzeug zwischen den Halten der Linie tatsächlich erreicht (Beschleunigung aus Leistung, Zugkraft und voll beladenem Gewicht, Bremsen bis zum Stillstand), falls sie unter der Höchstgeschwindigkeit bleibt, sonst einen grünen Haken. Bei Linien mit Fahrzeugen zählen für bereits befahrene Abschnitte die echte Streckenlänge und das Tempolimit, sonst die Luftlinie. Ein teilweise leeres Fahrzeug erreicht mehr. Der (+)/(-)-Hinweis vergleicht dann erreichbare statt nominelle Tempi. Aus beendet auch das Lesen der Strecke.",
+        "rate_reaches_top": "erreicht Höchstgeschwindigkeit",
+        "rate_reach_track_tooltip": "Durch die Strecke begrenzt: höchstes Limit, das 200 m am Stück gilt ({speed}); {known} von {total} Abschnitten bekannt, die übrigen nach Luftlinie."
     }
 }

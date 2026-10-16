@@ -36,7 +36,7 @@
 --    second vertical builtin.BoxLayout of that render is its right column.
 
 function data()
-	local VERSION = "0.15.2"
+	local VERSION = "0.16.0"
 
 	local react = ug_require "::/gui/main/react.lua"
 	local builtin = ug_require "::/gui/main/builtin.lua"
@@ -56,6 +56,10 @@ function data()
 	local statistics_react_util = ug_require "::/gui/statistics/statistics_react_util.tl"
 	local cargo_util = ug_require "::/gui/main/cargo_util.tl"
 	local rate_model = ug_require "kampfmoehre_rate_preview_1::/gui/kampfmoehre_rate_preview/rate_model.lua"
+	-- track speed limits per line section, collector shared with Top Speed Reached;
+	-- nil while the reachable speed param is Off (then no path data is read)
+	local track_limits = ug_require "kampfmoehre_rate_preview_1::/gui/kampfmoehre_rate_preview/track_limits.lua"
+	local tracks = nil
 
 	---------------------------------------------------------------------------
 	-- helpers
@@ -113,7 +117,7 @@ function data()
 			if speed == math.huge then speed = data and data.speed or nil end
 			if speed == math.huge then speed = nil end
 		end)
-		if not okT then log.warning("[rate_preview] vehicleTopSpeed failed: " .. tostring(errT)) end
+		if not okT then log.warning("[kampfmoehre_rate_preview] vehicleTopSpeed failed: " .. tostring(errT)) end
 		return speed
 	end
 
@@ -170,8 +174,9 @@ function data()
 	-- "(+)" if the new consist is faster than the line's current vehicles (the
 	-- estimate is then conservative), "(-)" if slower, "" if equal/unknown.
 	-- Note: defined before the local `ctx` exists, so the line is passed in.
-	-- With `sections` (straight-line lengths between stops) and the new consist's
-	-- physics, reachable speeds on this line are compared instead of nominal ones.
+	-- With `sections` ({ length, cap } per section, see lineSectionsWithTrack) and
+	-- the new consist's physics, reachable speeds on this line are compared
+	-- instead of nominal ones.
 	-- Reference speed of the line's current vehicles: reachable over `sections`
 	-- if given, else nominal. Cached for 30 s per line, vehicle set and sections:
 	-- it builds the vehicle data of every vehicle on the line (12 trams = 12
@@ -180,14 +185,20 @@ function data()
 	local function cachedReferenceSpeed(line, sections)
 		local okV, vs = pcall(api.engine.system.transportVehicleSystem.getLineVehicles, line)
 		if not okV or type(vs) ~= "table" then return nil end
-		local key = tostring(line) .. "|" .. table.concat(vs, ",") .. "|" .. (sections and table.concat(sections, ",") or "-")
+		local secKey = "-"
+		if sections then
+			local parts = {}
+			for i, sec in ipairs(sections) do parts[i] = string.format("%.0f/%s", sec.length, tostring(sec.cap)) end
+			secKey = table.concat(parts, ",")
+		end
+		local key = tostring(line) .. "|" .. table.concat(vs, ",") .. "|" .. secKey
 		local cached = refSpeedCache[key]
 		if cached and cached.until_ > os.time() then return cached.value or nil end
 		local ref = nil
 		if sections then
 			for _, v in ipairs(vs) do
 				local phys = vehiclePhysics(v)
-				local r = phys and rate_model.reachableSpeedOnLine(sections, phys) or vehicleTopSpeed(v)
+				local r = phys and rate_model.reachableSpeedOnSections(sections, phys) or vehicleTopSpeed(v)
 				if r and r > 0 and (ref == nil or r < ref) then ref = r end
 			end
 		end
@@ -200,7 +211,7 @@ function data()
 
 	local function speedHint(newSpeed, line, sections, newPhys)
 		if line == nil or type(newSpeed) ~= "number" or newSpeed <= 0 or newSpeed == math.huge then return "" end
-		local reach = (sections and newPhys) and rate_model.reachableSpeedOnLine(sections, newPhys) or nil
+		local reach = (sections and newPhys) and rate_model.reachableSpeedOnSections(sections, newPhys) or nil
 		if reach then newSpeed = reach end
 		local ref = cachedReferenceSpeed(line, reach and sections or nil)
 		if not ref then return "" end
@@ -403,7 +414,7 @@ function data()
 	-- about every frame, so each message is logged at most once per 10 s.
 	local roughLogged, roughLoggedCount = {}, 0
 	local function roughLog(msg)
-		msg = "[rate_preview] rough: " .. msg
+		msg = "[kampfmoehre_rate_preview] rough: " .. msg
 		local now = os.time()
 		local last = roughLogged[msg]
 		if last == nil or now - last >= 10 then
@@ -500,6 +511,33 @@ function data()
 			sections[i] = len
 		end
 		return sections
+	end
+
+	-- Sections of the line as { { length = m, cap = m/s or nil }, ... }: the real
+	-- track length and speed limit where track_limits knows the section (a
+	-- vehicle of the line has driven it since loading), else the straight-line
+	-- length without cap. Section i (stop i -> i + 1, 1-based) ends at the stop
+	-- with 0-based index i % n, track_limits' key. Second/third results: known
+	-- sections and their number.
+	local function lineSectionsWithTrack(line)
+		local straight = lineSectionLengths(line)
+		if straight == nil then return nil end
+		local n, out, known = #straight, {}, 0
+		if tracks then pcall(tracks.want, tracks, line, os.time()) end
+		for i, len in ipairs(straight) do
+			local sec = nil
+			if tracks then
+				local ok, v = pcall(tracks.section, tracks, line, i % n)
+				if ok then sec = v end
+			end
+			if sec then
+				known = known + 1
+				out[i] = { length = sec.length, cap = sec.runLimit or sec.maxLimit }
+			else
+				out[i] = { length = len }
+			end
+		end
+		return out, known, n
 	end
 
 	local function lineStraightLength(line)
@@ -769,7 +807,7 @@ function data()
 			end
 		end
 		if stats.count == 0 or stats.capacity <= 0 or stats.rate <= 0 then
-			local msg = string.format("[rate_preview] line %s: vehicles=%d capacity=%d rate=%s -> n/a",
+			local msg = string.format("[kampfmoehre_rate_preview] line %s: vehicles=%d capacity=%d rate=%s -> n/a",
 				tostring(ctx.line), stats.count, stats.capacity, tostring(stats.rate))
 			if msg ~= lastNaLog then
 				lastNaLog = msg
@@ -803,9 +841,9 @@ function data()
 				local ok, result = pcall(contextFromEvent, name, param)
 				ctx = ok and result or nil
 				if not ok then
-					log.warning("[rate_preview] context failed: " .. tostring(result))
+					log.warning("[kampfmoehre_rate_preview] context failed: " .. tostring(result))
 				end
-				log.message(string.format("[rate_preview] %s -> line=%s mode=%s oldCap=%s n=%s",
+				log.message(string.format("[kampfmoehre_rate_preview] %s -> line=%s mode=%s oldCap=%s n=%s",
 					tostring(name), tostring(ctx and ctx.line), tostring(ctx and ctx.mode),
 					tostring(ctx and ctx.oldCapacity), tostring(ctx and ctx.replaceCount)))
 			end
@@ -958,16 +996,27 @@ function data()
 					newPhys = physicsFromData(lastShownVehicleData, nil)
 				end
 				if newPhys then
-					sections = lineSectionLengths(ctx.line)
-					local reach = sections and rate_model.reachableSpeedOnLine(sections, newPhys) or nil
+					local known, total
+					sections, known, total = lineSectionsWithTrack(ctx.line)
+					local reach, capped = nil, false
+					if sections then reach, capped = rate_model.reachableSpeedOnSections(sections, newPhys) end
 					local secText = {}
-					for i, l in ipairs(sections or {}) do secText[i] = string.format("%.0f", l) end
+					for i, sec in ipairs(sections or {}) do
+						secText[i] = string.format("%.0f", sec.length) .. (sec.cap and string.format("@%.0f", sec.cap * 3.6) or "")
+					end
 					roughLog(string.format("reach line %s: sections=[%s] weight=%.1f t power=%.0f kW tractive=%.0f kN friction=%.3f top=%.1f brake=%s -> %s",
 						tostring(ctx.line), table.concat(secText, ","), newPhys.weight, newPhys.power, newPhys.tractiveEffort,
 						newPhys.friction or 0, newPhys.topSpeed * 3.6, tostring(newPhys.brakeDecel), reach and string.format("%.1f km/h", reach * 3.6) or "nil"))
 					if reach and reach < 0.98 * newPhys.topSpeed then
 						local okF, sp = pcall(api.util.formatSpeed, reach)
 						reachText = _("rate_reaches") .. " ≈ " .. ((okF and sp) or string.format("%.0f km/h", reach * 3.6))
+						if capped then
+							local okL, lang_util = pcall(ug_require, "::/scripts/lang_util.tl")
+							local vars = { speed = (okF and sp) or string.format("%.0f km/h", reach * 3.6), known = known, total = total }
+							local okT, tip = false, nil
+							if okL and lang_util then okT, tip = pcall(lang_util.format, _("rate_reach_track_tooltip"), vars) end
+							reachTooltip = (okT and tip) or nil
+						end
 					elseif reach then
 						-- shown too, so the feature visibly did its check
 						local okF, sp = pcall(api.util.formatSpeed, newPhys.topSpeed)
@@ -1203,7 +1252,7 @@ function data()
 									makeRateNode(text, extra, extraReached, extraTooltip, "", "kampfmoehre-rate-cart"))
 								rateInCart = true
 							elseif not ok then
-								log.warning("[rate_preview] cart entry failed: " .. tostring(text))
+								log.warning("[kampfmoehre_rate_preview] cart entry failed: " .. tostring(text))
 							end
 						end
 					end
@@ -1232,7 +1281,7 @@ function data()
 						end
 						table.insert(params.children, pos, node)
 					elseif not ok then
-						log.warning("[rate_preview] bottom bar failed: " .. tostring(text))
+						log.warning("[kampfmoehre_rate_preview] bottom bar failed: " .. tostring(text))
 					end
 				end
 				-- detail panel right column: identify the shown vehicle
@@ -1248,9 +1297,39 @@ function data()
 			return origBox(...)
 		end
 
-		log.message("[rate_preview] v" .. VERSION .. " hooks installed")
+		log.message("[kampfmoehre_rate_preview] v" .. VERSION .. " hooks installed")
 	end
 
+
+	-- Feeds the shared track_limits collector with the vehicles of all player
+	-- lines (list refreshed every TRACK_LIST_INTERVAL s); the collector throttles
+	-- itself, so with Top Speed Reached loaded too every section is read once.
+	local TRACK_STEP_INTERVAL = 2
+	local TRACK_LIST_INTERVAL = 10
+	local trackVehicles, trackVehicleLine, sinceTrackList = {}, {}, TRACK_LIST_INTERVAL
+	local function trackStep()
+		sinceTrackList = sinceTrackList + TRACK_STEP_INTERVAL
+		if sinceTrackList >= TRACK_LIST_INTERVAL then
+			sinceTrackList = 0
+			local list, lineOf = {}, {}
+			local okP, player = pcall(api.engine.util.getPlayer)
+			local okL, lines = false, nil
+			if okP and player ~= nil then okL, lines = pcall(api.engine.system.lineSystem.getLinesForPlayer, player) end
+			if okL and type(lines) == "table" then
+				for __, line in ipairs(lines) do
+					local okV, vs = pcall(api.engine.system.transportVehicleSystem.getLineVehicles, line)
+					if okV and type(vs) == "table" then
+						for __, v in ipairs(vs) do
+							list[#list + 1] = v
+							lineOf[v] = line
+						end
+					end
+				end
+			end
+			trackVehicles, trackVehicleLine = list, lineOf
+		end
+		tracks:step(trackVehicles, trackVehicleLine, os.time())
+	end
 
 	local rate_preview = {}
 	rate_preview.EntryPlugin = react.RegisterPluginRecipe(
@@ -1264,9 +1343,26 @@ function data()
 				local mine = ok and type(all) == "table" and all["kampfmoehre_rate_preview_1"] or nil
 				if type(mine) == "table" and mine.roughEstimate == 2 then roughEnabled = true end
 				reachableEnabled = not (type(mine) == "table" and mine.reachableSpeed == 1)
-				log.message("[rate_preview] rough estimate for empty lines: " .. tostring(roughEnabled)
-					.. ", reachable speed: " .. tostring(reachableEnabled))
+				tracks, trackVehicles, trackVehicleLine, sinceTrackList = nil, {}, {}, TRACK_LIST_INTERVAL
+				if reachableEnabled then
+					local okT, shared = pcall(track_limits.getShared, builtin, track_limits.engineAdapter, "kampfmoehre_rate_preview")
+					if okT then
+						tracks = shared
+						tracks:reset()
+					else
+						log.warning("[kampfmoehre_rate_preview] track limits unavailable: " .. tostring(shared))
+					end
+				end
+				log.message("[kampfmoehre_rate_preview] rough estimate for empty lines: " .. tostring(roughEnabled)
+					.. ", reachable speed: " .. tostring(reachableEnabled)
+					.. (tracks and (", track limits (collector API " .. tostring(tracks.API_VERSION) .. " from " .. tostring(tracks.owner) .. ")") or ""))
 			end)
+			-- track sampler: only while the reachable speed param is On
+			react.onStepTimer(function()
+				if not tracks then return end
+				local ok, err = pcall(trackStep)
+				if not ok then log.warning("[kampfmoehre_rate_preview] track step failed: " .. tostring(err)) end
+			end, TRACK_STEP_INTERVAL)
 			return builtin.BoxLayout{ children = {} }
 		end)
 	return rate_preview

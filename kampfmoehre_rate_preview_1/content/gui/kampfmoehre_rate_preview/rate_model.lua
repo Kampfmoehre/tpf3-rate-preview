@@ -265,6 +265,23 @@ function M.reachableSpeed(lengthMetres, phys)
 	return lo
 end
 
+-- max reachable speed over sections { { length = m, cap = m/s or nil }, ... }:
+-- per section min(reachableSpeed(length), cap), cap = the track's speed limit
+-- if known (track_limits.lua). Second result: true if the best section is
+-- limited by its cap rather than by physics. nil if unknown.
+function M.reachableSpeedOnSections(sections, phys)
+	local best, bestCapped = nil, false
+	for _, sec in ipairs(sections or {}) do
+		local v = M.reachableSpeed(sec.length, phys)
+		if v then
+			local capped = sec.cap ~= nil and sec.cap < v
+			if capped then v = sec.cap end
+			if best == nil or v > best then best, bestCapped = v, capped end
+		end
+	end
+	return best, bestCapped
+end
+
 -- max reachable speed over a list of section lengths, nil if unknown
 function M.reachableSpeedOnLine(sectionLengths, phys)
 	local best = nil

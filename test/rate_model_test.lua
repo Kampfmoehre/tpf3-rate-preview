@@ -139,6 +139,17 @@ near("line max over sections", M.reachableSpeedOnLine({ 500, 4000, 1000 }, aveli
 assert(M.reachableSpeed(4000, { weight = 100, power = 0, tractiveEffort = 100, topSpeed = 50 }) == nil, "no power -> nil")
 assert(M.reachableSpeed(4000, { weight = 100, power = 500, tractiveEffort = 1, friction = 2, topSpeed = 50 }) == nil, "friction > pull -> nil")
 assert(M.reachableSpeedOnLine({}, avelia) == nil, "no sections -> nil")
+-- sections with real track length and speed limit (cap, m/s; nil = unknown)
+local vs, capped = M.reachableSpeedOnSections({ { length = 8000, cap = 100 / 3.6 }, { length = 500 } }, avelia)
+near("track cap limits the long section", vs * 3.6, 100, 0.01)
+assert(capped == true, "capped flag when the cap decides")
+vs, capped = M.reachableSpeedOnSections({ { length = 4000, cap = 300 / 3.6 }, { length = 500, cap = 80 / 3.6 } }, avelia)
+near("cap above physics does not matter", vs, v4, 0.01)
+assert(capped == false, "not capped when physics decides")
+vs, capped = M.reachableSpeedOnSections({ { length = 4000 }, { length = 8000, cap = 240 / 3.6 } }, avelia)
+near("max over sections: capped 8 km (240) beats uncapped 4 km (~220)", vs * 3.6, 240, 0.01)
+assert(capped == true, "capped flag follows the best section")
+assert(M.reachableSpeedOnSections({}, avelia) == nil, "no sections -> nil (OnSections)")
 -- heavy freight train: 2000 t, 3000 kW, 250 kN, 100 km/h
 local freight = { weight = 2000, power = 3000, tractiveEffort = 250, friction = 0.5, topSpeed = 100 / 3.6, brakeDecel = 2.5 }
 local df = M.accelDistanceTime(freight, freight.topSpeed)
