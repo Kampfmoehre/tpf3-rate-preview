@@ -121,8 +121,19 @@ function data()
 		return speed
 	end
 
-	-- Physics of a consist for rate_model.reachableSpeed from the store's
-	-- vehicleData (weight/payload in t, power kW, tractive effort kN) and the
+	-- id of the passenger cargo type (cached)
+	local paxId = nil
+	local function passengerId()
+		if paxId == nil then
+			local ok, id = pcall(function() return api.res.cargoTypeRep.getPassengerCargoTypeId() end)
+			paxId = (ok and type(id) == "number") and id or -1
+		end
+		return paxId
+	end
+
+	-- Physics of a consist for rate_model.reachableSpeed / climbOnSections from
+	-- the store's vehicleData (weight/payload in t, power kW, tractive effort kN,
+	-- length m) and the
 	-- parts list for the brake deceleration; nil for ships, aircraft, unknown.
 	local function physicsFromData(data, parts)
 		if type(data) ~= "table" or (data.tractiveEffort or 0) <= 0 or (data.power or 0) <= 0 then return nil end
@@ -136,8 +147,18 @@ function data()
 				if type(b) == "number" and b > 0 and (brake == nil or b < brake) then brake = b end
 			end
 		end)
+		-- full load, passengers weigh 1/6 (cargo weightFactor, see rate_model.consistMass)
+		local pax, any, other = passengerId(), false, false
+		if type(data.allCargoTypes) == "table" then
+			for id in pairs(data.allCargoTypes) do
+				any = true
+				if id ~= pax then other = true end
+			end
+		end
+		local passengersOnly = any and not other
 		return {
-			weight = (data.weight or 0) + (data.weightMaxPayload or 0),
+			weight = rate_model.consistMass(data.weight, data.weightMaxPayload, passengersOnly),
+			length = data.length,
 			power = data.power,
 			tractiveEffort = data.tractiveEffort,
 			friction = data.rollingFriction or 0,
@@ -513,8 +534,9 @@ function data()
 		return sections
 	end
 
-	-- Sections of the line as { { length = m, cap = m/s or nil }, ... }: the real
-	-- track length and speed limit where track_limits knows the section (a
+	-- Sections of the line as { { length = m, cap = m/s or nil, profile = { step, h }
+	-- or nil }, ... }: the real track length, speed limit and height profile where
+	-- track_limits knows the section (a
 	-- vehicle of the line has driven it since loading), else the straight-line
 	-- length without cap. Section i (stop i -> i + 1, 1-based) ends at the stop
 	-- with 0-based index i % n, track_limits' key. Second/third results: known
@@ -532,7 +554,7 @@ function data()
 			end
 			if sec then
 				known = known + 1
-				out[i] = { length = sec.length, cap = sec.runLimit or sec.maxLimit }
+				out[i] = { length = sec.length, cap = sec.runLimit or sec.maxLimit, profile = sec.profile }
 			else
 				out[i] = { length = len }
 			end
@@ -569,16 +591,6 @@ function data()
 			if n > 0 then best = sum / n end
 		end)
 		return best
-	end
-
-	-- id of the passenger cargo type (cached)
-	local paxId = nil
-	local function passengerId()
-		if paxId == nil then
-			local ok, id = pcall(function() return api.res.cargoTypeRep.getPassengerCargoTypeId() end)
-			paxId = (ok and type(id) == "number") and id or -1
-		end
-		return paxId
 	end
 
 	-- Terminal load speed modifier of every stop for the given cargo classes
@@ -987,6 +999,7 @@ function data()
 			-- cart's consists; in Buy mode of single-vehicle carriers the shown vehicle
 			local sections, newPhys = nil, nil
 			local reachText, reachReached, reachTooltip = "", false, nil
+			local climbText = nil -- appended to the speed row: slowest point on a climb
 			if reachableEnabled then
 				for _, e in ipairs(cartEntries) do
 					if e.phys and (newPhys == nil or e.phys.topSpeed < newPhys.topSpeed) then newPhys = e.phys end
@@ -1024,6 +1037,55 @@ function data()
 						reachTooltip = _("rate_reaches_top") .. " (" .. reachText .. ")"
 						reachReached = true
 					end
+					-- climbs of known sections (height profile from track_limits):
+					-- the worst over the cart's consists
+					if sections then
+						local physList = {}
+						for __, e in ipairs(cartEntries) do
+							if e.phys then physList[#physList + 1] = e.phys end
+						end
+						if #physList == 0 then physList[1] = newPhys end
+						local worst, affected = nil, nil
+						for __, ph in ipairs(physList) do
+							local okC, w, list = pcall(rate_model.climbOnSections, sections, ph)
+							if not okC then
+								log.warning("[kampfmoehre_rate_preview] climb failed: " .. tostring(w))
+							elseif w and (worst == nil or w.minSpeed < worst.minSpeed) then
+								worst, affected = w, list
+							end
+						end
+						if worst then
+							roughLog(string.format("climb line %s: worst section %d min %.1f km/h at %.0f m grade %.1f%% stalls %s, affected %d",
+								tostring(ctx.line), worst.index, worst.minSpeed * 3.6, worst.at, worst.grade * 100,
+								tostring(worst.stalls), #affected))
+							local okL, lang_util = pcall(ug_require, "::/scripts/lang_util.tl")
+							local function fmt(key, vars)
+								local okT, t = false, nil
+								if okL and lang_util then okT, t = pcall(lang_util.format, _(key), vars) end
+								return (okT and t) or _(key)
+							end
+							local function speedText(v)
+								local okF, sp = pcall(api.util.formatSpeed, v)
+								return (okF and sp) or string.format("%.0f km/h", v * 3.6)
+							end
+							local function speedOf(r)
+								if r.stalls then return "< " .. speedText(rate_model.STALL_SPEED) end
+								return "≈ " .. speedText(r.minSpeed)
+							end
+							local function gradeOf(r) return string.format("%d %%", math.floor(r.grade * 100 + 0.5)) end
+							reachReached = false
+							climbText = fmt("rate_climb", { grade = gradeOf(worst), speed = speedOf(worst) })
+							local lines = { _("rate_climb_tooltip") }
+							local n = #sections
+							for __, r in ipairs(affected) do
+								lines[#lines + 1] = fmt("rate_climb_section", { from = r.index, to = r.index % n + 1,
+									grade = gradeOf(r), speed = speedOf(r) })
+							end
+							reachTooltip = (reachTooltip and (reachTooltip .. "\n\n") or "") .. table.concat(lines, "\n")
+						else
+							roughLog(string.format("climb line %s: none", tostring(ctx.line)))
+						end
+					end
 				end
 			end
 			-- Modify starts with the current consists -> estimate only after an edit.
@@ -1031,7 +1093,7 @@ function data()
 			if ctx.mode == "Modify" and #cartEntries > 0 and not cartEdited() then
 				local stats = lineStats(ctx.line)
 				if stats == nil or stats.rate <= 0 then return nil end
-				return _("Line rate") .. ": " .. formatInt(stats.rate), reachText, reachReached, reachTooltip
+				return _("Line rate") .. ": " .. formatInt(stats.rate), reachText, reachReached, reachTooltip, climbText
 			end
 			local text
 			if ctx.mode == "Modify" then
@@ -1070,7 +1132,7 @@ function data()
 			if text == nil then return nil end
 			local okH, hint = pcall(speedHint, newSpeed, ctx.line, sections, newPhys)
 			-- second value: extra line below (reachable speed), "" if none
-			return _("Line rate") .. ": " .. text .. ((okH and hint) or ""), reachText, reachReached, reachTooltip
+			return _("Line rate") .. ": " .. text .. ((okH and hint) or ""), reachText, reachReached, reachTooltip, climbText
 		end
 
 		-- The cart re-renders every frame (VehicleCart's onStep transforms its
@@ -1087,13 +1149,14 @@ function data()
 			local key = table.concat(parts, ";")
 			local cached = barCache[key]
 			if cached and cached.until_ > os.time() then
-				return cached.text, cached.extra, cached.extraReached, cached.extraTooltip
+				return cached.text, cached.extra, cached.extraReached, cached.extraTooltip, cached.climb
 			end
-			local text, extra, extraReached, extraTooltip = bottomBarText()
+			local text, extra, extraReached, extraTooltip, climb = bottomBarText()
 			if barCacheCount > 20 then barCache, barCacheCount = {}, 0 end
 			if cached == nil then barCacheCount = barCacheCount + 1 end
-			barCache[key] = { text = text, extra = extra, extraReached = extraReached, extraTooltip = extraTooltip, until_ = os.time() + 2 }
-			return text, extra, extraReached, extraTooltip
+			barCache[key] = { text = text, extra = extra, extraReached = extraReached, extraTooltip = extraTooltip,
+				climb = climb, until_ = os.time() + 2 }
+			return text, extra, extraReached, extraTooltip, climb
 		end
 
 		-- the bar's stretch spacer sits right before the buy button; remember the
@@ -1160,9 +1223,10 @@ function data()
 
 		-- Our text block. TextView cannot wrap: a second line (reachable speed)
 		-- goes into a vertical layout, and the full text is the tooltip when
-		-- clipped. pad: spaces around the texts (the bottom bar has no spacing);
-		-- boxClass: always wrap in a vertical layout with this class.
-		local function makeRateNode(text, extra, extraReached, extraTooltip, pad, boxClass)
+		-- clipped. climbText: appended to the speed row in a warning colour
+		-- (slowest point on a climb). pad: spaces around the texts (the bottom bar
+		-- has no spacing); boxClass: always wrap in a vertical layout with this class.
+		local function makeRateNode(text, extra, extraReached, extraTooltip, climbText, pad, boxClass)
 			local node = builtin.TextView{
 				meta = { class = "font-scale-body" },
 				text = pad .. text .. pad,
@@ -1185,6 +1249,13 @@ function data()
 						tooltipWhenClipped = extra,
 					},
 				}
+				if type(climbText) == "string" and climbText ~= "" then
+					row[#row + 1] = builtin.TextView{
+						meta = { class = "font-scale-body, negative" },
+						text = "· " .. climbText .. "  ",
+						tooltipWhenClipped = climbText,
+					}
+				end
 				if pad ~= "" then
 					table.insert(row, 1, builtin.TextView{ meta = { class = "font-scale-body" }, text = pad })
 				end
@@ -1245,11 +1316,11 @@ function data()
 						lastDeleteButton = nil
 						if ctx and ctx.mode == "Replace" and #cartEntries == 0 and pendingEntry ~= nil then
 							cartEntries = { pendingEntry }
-							local ok, text, extra, extraReached, extraTooltip = pcall(cachedBottomBarText)
+							local ok, text, extra, extraReached, extraTooltip, climbText = pcall(cachedBottomBarText)
 							cartEntries = {}
 							if ok and text then
 								table.insert(params.children, pos,
-									makeRateNode(text, extra, extraReached, extraTooltip, "", "kampfmoehre-rate-cart"))
+									makeRateNode(text, extra, extraReached, extraTooltip, climbText, "", "kampfmoehre-rate-cart"))
 								rateInCart = true
 							elseif not ok then
 								log.warning("[kampfmoehre_rate_preview] cart entry failed: " .. tostring(text))
@@ -1268,13 +1339,13 @@ function data()
 							tick:set(tick:old() + 1)
 						end, 3)
 					end)
-					local ok, text, extra, extraReached, extraTooltip = true, nil, nil, nil, nil
+					local ok, text, extra, extraReached, extraTooltip, climbText = true, nil, nil, nil, nil, nil
 					if not rateInCart then
-						ok, text, extra, extraReached, extraTooltip = pcall(cachedBottomBarText)
+						ok, text, extra, extraReached, extraTooltip, climbText = pcall(cachedBottomBarText)
 					end
 					cartEntries, pendingEntry, rateInCart, lastDeleteButton = {}, nil, false, nil
 					if ok and text then
-						local node = makeRateNode(text, extra, extraReached, extraTooltip, "   ", nil)
+						local node = makeRateNode(text, extra, extraReached, extraTooltip, climbText, "   ", nil)
 						local pos = #params.children + 1
 						for i, child in ipairs(params.children) do
 							if child == lastSpacer then pos = i break end

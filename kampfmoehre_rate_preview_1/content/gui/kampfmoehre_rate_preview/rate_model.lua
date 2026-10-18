@@ -292,4 +292,157 @@ function M.reachableSpeedOnLine(sectionLengths, phys)
 	return best
 end
 
+---------------------------------------------------------------------------
+-- Gradients (measured 2026-10-18 against MOVE_PATH.dyn.accel, rms 0.005 m/s²):
+-- a = (F(v) - friction - G * s * m) / m with the game's own G = 3.27
+-- (vehicle_util.tl calcDownhillSlopeForce, a third of real gravity) and
+-- s = mean grade under the train. Mass: empty weight + max payload times the
+-- cargo's weightFactor (1.0 goods, 1/6 passengers, base/content/cargos), i.e.
+-- full load; a loaded stone train climbed lighter than that, so this errs on
+-- the slow side.
+-- section = { length = m, cap = m/s?, profile = { step = m, h = { h(0), h(step), ... } } }
+-- (track_limits.lua, travel direction); phys as above plus length (train, m).
+---------------------------------------------------------------------------
+M.GRAVITY = 3.27
+M.PASSENGER_WEIGHT_FACTOR = 1 / 6
+M.CLIMB_AFFECTED = 0.9      -- affected: min speed below this share of the flat run there
+M.CLIMB_WINDOW = 200        -- m, window for the shown grade
+M.STALL_SPEED = 5 / 3.6     -- shown as "< 5 km/h" when the consist cannot climb
+M.CLIMB_MIN_SPEED = 0.5     -- m/s, floor of the integration
+M.DEFAULT_TRAIN_LENGTH = 20
+
+-- consist mass in t: empty + full payload, passengers weigh 1/6
+function M.consistMass(weightEmpty, weightMaxPayload, passengersOnly)
+	local factor = passengersOnly and M.PASSENGER_WEIGHT_FACTOR or 1
+	return (weightEmpty or 0) + (weightMaxPayload or 0) * factor
+end
+
+local function heightAt(profile, x)
+	local h, step = profile.h, profile.step
+	local n = #h
+	local f = x / step
+	local i = math.floor(f)
+	if n == 1 or i < 0 then return h[1] end
+	if i >= n - 1 then return h[n] end
+	return h[i + 1] + (h[i + 2] - h[i + 1]) * (f - i)
+end
+
+-- speeds at x = (k - 1) * step from a standing start; with grade = false on
+-- the flat. Further results: longest stretch (m) the consist cannot climb,
+-- grade under the train per position.
+local function speedRun(profile, length, phys, withGrade, trainLength)
+	local step, m, G = profile.step, phys.weight, M.GRAVITY
+	local friction = phys.friction or 0
+	local vmax = phys.topSpeed
+	if phys.cap and phys.cap < vmax then vmax = phys.cap end
+	local n = math.floor(length / step) + 1
+	local v, out, slopes = M.CLIMB_MIN_SPEED, {}, {}
+	local run, stall = 0, 0
+	local h0 = heightAt(profile, 0)
+	for k = 1, n do
+		out[k] = v
+		local x = (k - 1) * step
+		local s = 0
+		if withGrade then
+			if x < trainLength then
+				s = (heightAt(profile, x) - h0) / math.max(x, step)
+			else
+				s = (heightAt(profile, x) - heightAt(profile, x - trainLength)) / trainLength
+			end
+			if G * s * m + friction >= phys.tractiveEffort then run = run + step else run = 0 end
+			if run > stall then stall = run end
+		end
+		slopes[k] = s
+		local a = (pull(phys, v) - friction - G * s * m) / m
+		local v2 = v * v + 2 * a * step
+		v = v2 > 0 and math.sqrt(v2) or 0
+		if v < M.CLIMB_MIN_SPEED then v = M.CLIMB_MIN_SPEED end
+		if v > vmax then v = vmax end
+	end
+	return out, stall, slopes
+end
+
+-- speed the consist can hold on grade s (pull = resistance), capped at vmax;
+-- 0 if it cannot climb s at all
+local function balanceSpeed(phys, s, vmax)
+	local force = (phys.friction or 0) + M.GRAVITY * s * phys.weight
+	if force <= 0 then return vmax end
+	if force >= phys.tractiveEffort then return 0 end
+	return math.min(vmax, phys.power / force)
+end
+
+-- slowest point of a climb on one section (see the spec
+-- docs/superpowers/specs/2026-10-18-gradient-speed-design.md):
+-- -> { minSpeed, at, grade, flatSpeed, affected, stalls } or nil without profile
+function M.climbOnSection(section, phys)
+	if type(section) ~= "table" or type(section.profile) ~= "table" or not physValid(phys) then return nil end
+	local profile = section.profile
+	if type(profile.h) ~= "table" or #profile.h == 0 or (profile.step or 0) <= 0 then return nil end
+	local step = profile.step
+	local length = section.length or (#profile.h - 1) * step
+	if length <= 0 then return nil end
+	local trainLength = phys.length or M.DEFAULT_TRAIN_LENGTH
+	if trainLength <= 0 then trainLength = M.DEFAULT_TRAIN_LENGTH end
+	local p = { weight = phys.weight, power = phys.power, tractiveEffort = phys.tractiveEffort,
+		friction = phys.friction, topSpeed = phys.topSpeed, cap = section.cap }
+	local grade, stall, slopes = speedRun(profile, length, p, true, trainLength)
+	local flat = speedRun(profile, length, p, false, trainLength)
+	local n = #grade
+	local b = (phys.brakeDecel and phys.brakeDecel > 0) and phys.brakeDecel or M.DEFAULT_BRAKE_DECEL
+	local vmax = p.topSpeed
+	if p.cap and p.cap < vmax then vmax = p.cap end
+	-- per position the speed the climb holds the train to: what it has there,
+	-- or, if it is still accelerating (from the stop), what it could hold on
+	-- that grade. Slower acceleration alone (a gentle grade on which the
+	-- top speed is still reachable) does not count. Affected positions are
+	-- those below CLIMB_AFFECTED of the flat run there; the result is the
+	-- lowest of them (else the lowest overall, not affected). Braking zone
+	-- excluded.
+	local hit, low, any = nil, nil, nil
+	for k = 1, n do
+		local e = math.max(grade[k], balanceSpeed(p, slopes[k], vmax))
+		if any == nil or e < any.e then any = { k = k, e = e } end
+		local x = (k - 1) * step
+		if x <= length - flat[k] * flat[k] / (2 * b) then
+			if low == nil or e < low.e then low = { k = k, e = e } end
+			if e < M.CLIMB_AFFECTED * flat[k] and (hit == nil or e < hit.e) then hit = { k = k, e = e } end
+		end
+	end
+	local pick = hit or low or any
+	local minSpeed, affected = pick.e, hit ~= nil
+	local best = pick.k
+	local at = (best - 1) * step
+	-- steepest mean grade over CLIMB_WINDOW ending at or before `at`
+	local w = math.min(M.CLIMB_WINDOW, length)
+	local steepest = (heightAt(profile, w) - heightAt(profile, 0)) / w
+	for e = w, at, step do
+		local g = (heightAt(profile, e) - heightAt(profile, e - w)) / w
+		if g > steepest then steepest = g end
+	end
+	return {
+		minSpeed = minSpeed,
+		at = at,
+		grade = steepest,
+		flatSpeed = flat[best],
+		affected = affected,
+		stalls = stall >= trainLength,
+	}
+end
+
+-- affected sections (each result gets index = 1-based section) and the one
+-- with the lowest min speed; filtering first, so a mild section never hides
+-- a mountain
+function M.climbOnSections(sections, phys)
+	local worst, list = nil, {}
+	for i, sec in ipairs(sections or {}) do
+		local r = M.climbOnSection(sec, phys)
+		if r and r.affected then
+			r.index = i
+			list[#list + 1] = r
+			if worst == nil or r.minSpeed < worst.minSpeed then worst = r end
+		end
+	end
+	return worst, list
+end
+
 return M

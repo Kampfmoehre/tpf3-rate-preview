@@ -99,7 +99,8 @@ consecutive stops, waypoints included) the largest speed is searched for
 which the acceleration distance plus the braking distance fit into the
 section; the maximum over all sections is shown. Acceleration uses the
 game's own tooltip physics: pull `min(tractive effort, power / v)` minus
-rolling friction, divided by the full weight (empty + max payload); braking
+rolling friction, divided by the weight with full load (empty + max payload
+times the cargo's `weightFactor`: 1.0 for goods, 1/6 for passengers); braking
 with the parts' `brakeDeceleration` (2.5 m/s² for most vehicles). Below
 98 % of the top speed the line shows `reaches ≈ X`, otherwise
 the top speed in green with a check mark (tooltip `reaches top speed (X)`),
@@ -120,13 +121,40 @@ or a window re-reads that line's sections, so a track upgrade shows within
 seconds; otherwise a section is read again after 5 minutes), and runs only
 while this parameter is on; with both mods loaded each section is read once.
 
-The weight is the fully loaded one, as in the game's own performance
-rating; the game simulates the payload, and a fully loaded Avelia Liberty is
-about 500 t instead of 410 t empty. A partly empty vehicle accelerates better
-and reaches more (measured: 227 km/h at 32 % load where the model says 200 km/h
-for a full train on a 4 km section). Uphill sections are not considered, and
-a section counts its highest limit only, not slower stretches in between.
-Ships and aircraft are not covered.
+The weight assumes a full load. Every cargo type has a `weightFactor`
+(`base/content/cargos/*/*.cargo.lua`): 1.0 for goods, 1/6 for passengers, so
+132 passengers in coaches with 158 t max payload weigh about 26 t (measured:
+a full GG1 train moved like ~410 t at 395 t empty). A partly empty vehicle
+accelerates better and reaches more. A section counts its highest limit
+only, not slower stretches in between. Ships and aircraft are not covered.
+
+### Gradients
+
+The collector also keeps each known section's height profile (the edges'
+`geometry.height`, resampled every 10 m in travel direction). For every
+consist in the cart the section is simulated from a standing start with
+
+    a = (min(tractive effort, power / v) - friction - G * s * m) / m
+
+where `s` is the mean grade under the train (over its length) and
+G = 3.27, the game's own constant (`vehicle_util.tl`
+`calcDownhillSlopeForce`, about a third of real gravity; measured against the
+engine's reported acceleration on a 12 % climb with an rms error of
+0.005 m/s²). Per position the climb holds the train to the higher of its
+simulated speed and the speed it could hold on that grade (pull = grade force
++ friction, capped at the top speed and the track limit), so a train that
+accelerates up a ramp right from the stop is measured by what the ramp lets
+it reach, and a gentle grade on which the top speed is still reachable does
+not count. Positions below 90 % of a flat run at the same place are
+affected (braking zone excluded); the slowest of them is the section's
+result, and the worst affected section
+is appended to the speed row in a warning colour, e.g.
+`reaches ≈ 62 km/h · Gradient 12 %: ≈ 18 km/h` (steepest 200 m before that
+point), without the green check mark, and the tooltip lists every affected
+section by its stops. A consist that cannot pull the grade at all shows
+`< 5 km/h`. Only sections a vehicle of the line has driven are known. A
+loaded stone train climbed lighter than the full-load weight, so the shown
+speed errs on the slow side.
 
 ## How the rough estimate works
 

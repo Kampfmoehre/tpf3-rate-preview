@@ -50,6 +50,48 @@ near("short section: less than half is not", s and s.runLimit, 40 * kmh)
 check("empty edge list gives nil", M.summarize({}) == nil)
 check("nil edge list gives nil", M.summarize(nil) == nil)
 
+-- gradeProfile ---------------------------------------------------------------
+-- 500 m flat, 1000 m at +2 % (one edge stored backwards, no flag), 500 m at -1 %
+local p = M.gradeProfile({
+	{ length = 500, h0 = 100, h1 = 100 },
+	{ length = 500, h0 = 100, h1 = 110 },
+	{ length = 500, h0 = 120, h1 = 110 },
+	{ length = 500, h0 = 120, h1 = 115 },
+})
+near("profile length", p and p.length, 2000)
+near("profile rise", p and p.rise, 20)
+near("profile fall", p and p.fall, 5)
+near("profile end height", p and p.endH, 115)
+check("profile has no gaps", p and p.gaps == 0, p and tostring(p.gaps))
+near("profile steepest 200 m up", p and p.windows[200].up, 0.02, 1e-6)
+near("profile steepest 200 m down", p and p.windows[200].down, -0.01, 1e-6)
+near("profile steepest 1000 m up", p and p.windows[1000].up, 0.02, 1e-6)
+near("profile 1000 m up starts at the climb", p and p.windows[1000].upAt, 500)
+near("profile height at 750 m", p and p.heights[4], 105)
+-- the direction flag wins over continuity
+p = M.gradeProfile({
+	{ length = 100, h0 = 10, h1 = 12, fwd = false },
+	{ length = 100, h0 = 10, h1 = 9, fwd = true },
+})
+near("profile honours fwd=false", p and p.startH, 12)
+near("profile fwd flags: fall", p and p.fall, 3)
+check("profile without heights is nil", M.gradeProfile({ { length = 100 } }) == nil)
+
+-- resampleProfile: travel-oriented heights every `step` metres
+local rp = M.resampleProfile({
+	{ length = 100, h0 = 0, h1 = 10 },
+	{ length = 100, h0 = 20, h1 = 10 },   -- stored backwards, no fwd: continuity flips it
+}, 10)
+check("resample step", rp and rp.step == 10)
+check("resample count", rp and #rp.h == 21, rp and tostring(#rp.h))
+near("resample start", rp and rp.h[1], 0)
+near("resample middle", rp and rp.h[11], 10)
+near("resample end rises", rp and rp.h[21], 20)
+near("resample honours fwd=false", M.resampleProfile({ { length = 100, h0 = 5, h1 = 0, fwd = false } }, 10).h[11], 5)
+check("resample without heights", M.resampleProfile({ { length = 100 } }, 10) == nil)
+check("summary carries profile", M.summarize({ { limit = 20, curve = 200, length = 100, h0 = 0, h1 = 5 } }).profile ~= nil)
+check("api version 3", M.API_VERSION == 3)
+
 -- collector with a fake engine ---------------------------------------------
 -- vehicles: entity -> { enRoute, stopIndex, edges }
 local clock = 0

@@ -157,6 +157,97 @@ local df = M.accelDistanceTime(freight, freight.topSpeed)
 near("freight accel distance ~ 5.0 km", df, 4967, 40)
 near("freight on 2 km (km/h)", M.reachableSpeed(2000, freight) * 3.6, 70, 10)
 
+-- gradients (measured 2026-10-18, see CLAUDE.md "Gradients") ----------------
+local function check(name, cond)
+	if cond then
+		print("ok   " .. name)
+	else
+		failures = failures + 1
+		print("FAIL " .. name)
+	end
+end
+-- { step = s, h = {...} } from { { length, grade }, ... }, heights from 0
+local function profile(step, segments)
+	local h = { 0 }
+	for __, seg in ipairs(segments) do
+		for _ = 1, math.floor(seg[1] / step + 0.5) do h[#h + 1] = h[#h] + seg[2] * step end
+	end
+	return { step = step, h = h }
+end
+local alco = { weight = 233, power = 450, tractiveEffort = 125, friction = 0.16, topSpeed = 70 / 3.6, brakeDecel = 2.5, length = 69 }
+
+near("mass passengers", M.consistMass(395, 158.4, true), 395 + 158.4 / 6)
+near("mass goods", M.consistMass(233, 84, false), 317)
+-- long 11.8 % climb: balance speed P / (G s m + f) = 450 / (3.27*0.118*233 + 0.16) = 5.0 m/s
+local r = M.climbOnSection({ length = 2400, profile = profile(10, { { 300, 0 }, { 1500, 0.118 }, { 600, 0 } }) }, alco)
+near("long climb min speed", r and r.minSpeed * 3.6, 18.0, 0.7)
+check("long climb affected", r and r.affected)
+near("long climb grade", r and r.grade, 0.118, 0.002)
+-- climb straight from the stop (Emmaboda case): monotone start, still found
+r = M.climbOnSection({ length = 2400, profile = profile(10, { { 1800, 0.118 }, { 600, 0 } }) }, alco)
+near("climb from stop min speed", r and r.minSpeed * 3.6, 18.0, 0.7)
+-- 60 m hump at 5 % on 2 km: momentum carries it
+r = M.climbOnSection({ length = 2000, profile = profile(10, { { 1000, 0 }, { 60, 0.05 }, { 940, 0 } }) }, alco)
+check("short hump not affected", r and not r.affected)
+-- flat and downhill never affected
+r = M.climbOnSection({ length = 2000, profile = profile(10, { { 2000, 0 } }) }, alco)
+check("flat not affected", r and not r.affected)
+r = M.climbOnSection({ length = 2000, profile = profile(10, { { 2000, -0.05 } }) }, alco)
+check("downhill not affected", r and not r.affected)
+-- cannot climb: 3.27 * 0.2 * 233 = 152 kN > 125 kN
+r = M.climbOnSection({ length = 2000, profile = profile(10, { { 200, 0 }, { 800, 0.2 }, { 1000, 0 } }) }, alco)
+check("stall detected", r and r.stalls and r.affected)
+-- section shorter than window and train
+check("tiny section no error", M.climbOnSection({ length = 50, profile = profile(10, { { 50, 0.03 } }) }, alco) ~= nil)
+check("no profile -> nil", M.climbOnSection({ length = 2000 }, alco) == nil)
+-- filter first, then worst: mild section (index 1) must not hide the mountain (index 2)
+local worst, list = M.climbOnSections({
+	{ length = 800, profile = profile(10, { { 800, 0.01 } }) },
+	{ length = 2400, profile = profile(10, { { 300, 0 }, { 1500, 0.118 }, { 600, 0 } }) },
+}, alco)
+check("worst is the mountain", worst and worst.index == 2)
+check("only affected listed", list and #list == 1)
+-- review findings: the slowest point must be grade-limited, not a point of slower acceleration
+local alcoFull = { weight = 317, power = 450, tractiveEffort = 125, friction = 0.16, topSpeed = 70 / 3.6, brakeDecel = 2.5, length = 69 }
+-- short steep climb straight from the stop, ends before the flat run cruises:
+-- balance speed 450 / (0.16 + 3.27*0.118*317) = 3.67 m/s = 13.2 km/h
+r = M.climbOnSection({ length = 2000, profile = profile(10, { { 600, 0.118 }, { 1400, 0 } }) }, alcoFull)
+near("short steep climb from stop", r and r.minSpeed * 3.6, 13.2, 1.5)
+check("short steep climb from stop affected", r and r.affected)
+-- gentle grades on which the consist still reaches its top speed
+r = M.climbOnSection({ length = 2000, profile = profile(10, { { 2000, 0.01 } }) }, alcoFull)
+check("1 % climb, top speed reachable: not affected", r and not r.affected)
+local freight = { weight = 1200, power = 3000, tractiveEffort = 300, friction = 0.2, topSpeed = 100 / 3.6, brakeDecel = 2.5, length = 400 }
+r = M.climbOnSection({ length = 4000, profile = profile(10, { { 4000, 0.02 } }) }, freight)
+check("2 % freight climb, top speed reachable: not affected", r and not r.affected)
+-- moderate climb from the stop, uniform: balance 50 km/h for a 70 km/h consist
+-- (s = (450 / 13.89 - 0.16) / (3.27 * 233) = 0.0423); equal e everywhere must not
+-- pick the stop where the flat run is still slow
+r = M.climbOnSection({ length = 3000, profile = profile(10, { { 3000, 0.0423 } }) }, alco)
+check("moderate climb from stop affected", r and r.affected)
+near("moderate climb from stop min speed", r and r.minSpeed * 3.6, 50, 1.5)
+-- same with exactly representable heights (1/16 grade, 0.5 m per 8 m): exact ties
+-- balance 450 / (0.16 + 3.27*0.0625*233) = 9.42 m/s = 33.9 km/h
+r = M.climbOnSection({ length = 2992, profile = profile(8, { { 2992, 0.0625 } }) }, alco)
+check("exact-tie climb from stop affected", r and r.affected)
+near("exact-tie climb from stop min speed", r and r.minSpeed * 3.6, 33.9, 1.0)
+-- real Emmaboda section 131749 stop 0 (log 2026-10-18): heights every 250 m, 2175 m
+do
+	local hs, h = { 5, 8, 33, 58, 77, 93, 108, 118, 119 }, {}
+	for x = 0, 2170, 10 do
+		local i = math.min(math.floor(x / 250), #hs - 2)
+		h[#h + 1] = hs[i + 1] + (hs[i + 2] - hs[i + 1]) * math.min(1, (x - 250 * i) / 250)
+	end
+	-- steepest stretch 10 % (250 m resolution): balance 450 / (0.16 + 3.27*0.10*317) = 15.6 km/h
+	r = M.climbOnSection({ length = 2175, cap = 100 / 3.6, profile = { step = 10, h = h } }, alcoFull)
+	near("Emmaboda min speed", r and r.minSpeed * 3.6, 15.6, 1.5)
+	near("Emmaboda grade", r and r.grade, 0.10, 0.01)
+end
+-- cost: 10 km section
+local t0 = os.clock()
+M.climbOnSection({ length = 10000, profile = profile(10, { { 10000, 0.02 } }) }, alco)
+check("10 km section < 5 ms", os.clock() - t0 < 0.005)
+
 if failures > 0 then
 	print(failures .. " failure(s)")
 	os.exit(1)
