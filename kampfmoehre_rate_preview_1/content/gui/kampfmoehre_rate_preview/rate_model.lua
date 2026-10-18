@@ -445,4 +445,36 @@ function M.climbOnSections(sections, phys)
 	return worst, list
 end
 
+---------------------------------------------------------------------------
+-- Catenary. parts = { { engine type, ... }, ... } (per store part, from
+-- landVehicle.engines[i].type): a part with engines that are all of
+-- `electricType` needs catenary. The models' transportModes do not tell it
+-- (every base locomotive, diesel too, lists TRAIN and ELECTRIC_TRAIN); the
+-- engine type is what the store's "Electric" filter and the game's "no
+-- electric path" go by.
+---------------------------------------------------------------------------
+function M.consistNeedsCatenary(parts, electricType)
+	for __, engines in ipairs(parts or {}) do
+		local any, allElectric = false, true
+		for __, t in ipairs(engines) do
+			any = true
+			if t ~= electricType then allElectric = false end
+		end
+		if any and allElectric then return true end
+	end
+	return false
+end
+
+-- sections with rails lacking catenary: { { index = 1-based, metres, at }, ... }
+-- (unknown sections have no unelectrified field and are skipped)
+function M.missingCatenary(sections)
+	local out = {}
+	for i, sec in ipairs(sections or {}) do
+		if (sec.unelectrified or 0) > 0 then
+			out[#out + 1] = { index = i, metres = sec.unelectrified, at = sec.unelectrifiedAt or 0 }
+		end
+	end
+	return out
+end
+
 return M

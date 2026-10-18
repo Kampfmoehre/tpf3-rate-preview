@@ -152,3 +152,15 @@ length) the speed text is "< 5 km/h" (what the game does then is unverified).
   from the 2026-10-18 log: section 131749 stop 0, 2175 m, heights every 250 m
   `5 8 33 58 77 93 108 118 119`, steepest 200 m +11.67 %).
 - The exact warning CSS class and tooltip wording.
+
+## Addendum (2026-10-18): catenary warning
+
+Requested after an E 94 bought for the non-electrified Emmaboda line stopped with "no electric
+path" in front of a switch. Same data path: per known section `unelectrified` (m) and
+`unelectrifiedAt` (m) from edges whose `transportModes` have TRAIN / TRAM / TRAM_TRACK without
+the electric variant; a cart entry needs catenary when a part has engines and all are
+`VehicleEngineType.ELECTRIC` (first built on `tv.transportModes`, which failed in-game: every base
+locomotive's model lists TRAIN and ELECTRIC_TRAIN, the ALCO diesel too). Any missing metres
+warn equally (a short gap stops the train completely): `· no catenary (1 of 3 sections)` before
+the climb part, tooltip per section with metres and start position, plus "x of n sections known"
+when not all are known. Depot not checked; single vehicles without cart list not checked.

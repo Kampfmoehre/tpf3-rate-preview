@@ -167,6 +167,24 @@ function data()
 		}
 	end
 
+	-- true if a part of the consist (store parts) has only electric engines,
+	-- i.e. needs catenary; nil if unknown (runs in the cart's per-frame
+	-- collectVehicleData hook: no engine queries)
+	local function consistNeedsCatenary(parts)
+		local result = nil
+		pcall(function()
+			local list = {}
+			for __, v in ipairs(parts or {}) do
+				local types = {}
+				local engines = v.landVehicle and v.landVehicle.engines
+				for __, e in ipairs(engines or {}) do types[#types + 1] = e.type end
+				list[#list + 1] = types
+			end
+			result = rate_model.consistNeedsCatenary(list, api.type.enum.VehicleEngineType.ELECTRIC)
+		end)
+		return result
+	end
+
 	-- physics of an existing vehicle (incl. maintenance-adjusted top speed)
 	local function vehiclePhysics(vehicle)
 		local phys = nil
@@ -554,7 +572,8 @@ function data()
 			end
 			if sec then
 				known = known + 1
-				out[i] = { length = sec.length, cap = sec.runLimit or sec.maxLimit, profile = sec.profile }
+				out[i] = { length = sec.length, cap = sec.runLimit or sec.maxLimit, profile = sec.profile,
+					unelectrified = sec.unelectrified, unelectrifiedAt = sec.unelectrifiedAt }
 			else
 				out[i] = { length = len }
 			end
@@ -913,6 +932,7 @@ function data()
 					cap = (type(result) == "table" and result.totalCapacity) or 0,
 					loadingSpeed = consistLoadSpeed(vehicles) or (type(result) == "table" and result.loadingSpeed) or nil,
 					phys = physicsFromData(result, vehicles),
+					needsCatenary = consistNeedsCatenary(vehicles),
 					capCargo = (type(result) == "table" and result.totalCapacityCargo) or 0,
 					allCargoTypes = (type(result) == "table" and result.allCargoTypes) or nil,
 					fingerprint = cartPartsFingerprint,
@@ -1084,6 +1104,44 @@ function data()
 							reachTooltip = (reachTooltip and (reachTooltip .. "\n\n") or "") .. table.concat(lines, "\n")
 						else
 							roughLog(string.format("climb line %s: none", tostring(ctx.line)))
+						end
+					end
+					-- catenary: a cart consist that needs it on known sections without it
+					local needsCat = false
+					for __, e in ipairs(cartEntries) do
+						if e.needsCatenary then needsCat = true end
+					end
+					if needsCat and sections then
+						local missing = rate_model.missingCatenary(sections)
+						roughLog(string.format("catenary line %s: needed, missing on %d of %d sections (%d known)",
+							tostring(ctx.line), #missing, total or 0, known or 0))
+						if #missing > 0 then
+							local okL, lang_util = pcall(ug_require, "::/scripts/lang_util.tl")
+							local function fmt(key, vars)
+								local okT, t = false, nil
+								if okL and lang_util then okT, t = pcall(lang_util.format, _(key), vars) end
+								return (okT and t) or _(key)
+							end
+							local function lengthText(m)
+								local okF, t = pcall(api.util.formatLength, m)
+								return (okF and type(t) == "string") and t or string.format("%.0f m", m)
+							end
+							reachReached = false
+							local unknown = (total and known) and (total - known) or 0
+							local catText = (unknown > 0)
+								and fmt("rate_no_catenary_partial", { count = #missing, total = total, unknown = unknown })
+								or fmt("rate_no_catenary", { count = #missing, total = total or #sections })
+							climbText = climbText and (catText .. " · " .. climbText) or catText
+							local lines = { _("rate_no_catenary_tooltip") }
+							local n = #sections
+							for __, m in ipairs(missing) do
+								lines[#lines + 1] = fmt("rate_no_catenary_section", { from = m.index, to = m.index % n + 1,
+									metres = lengthText(m.metres), at = lengthText(m.at) })
+							end
+							if known and total and known < total then
+								lines[#lines + 1] = fmt("rate_sections_known", { known = known, total = total })
+							end
+							reachTooltip = (reachTooltip and (reachTooltip .. "\n\n") or "") .. table.concat(lines, "\n")
 						end
 					end
 				end

@@ -156,6 +156,19 @@ section by its stops. A consist that cannot pull the grade at all shows
 loaded stone train climbed lighter than the full-load weight, so the shown
 speed errs on the slow side.
 
+### Catenary
+
+A consist needs catenary when one of its parts has engines and all of them
+are electric (`landVehicle.engines[i].type`, the same as the store's
+"Electric" filter). The models' `transportModes` do not tell it: every base
+locomotive, diesel too, lists `TRAIN` and `ELECTRIC_TRAIN`. The collector counts, per known section, the metres of edges that
+have rails but not their electric variant (edge `transportModes`). If the
+cart needs catenary and a known section lacks it, the speed row shows
+`· no catenary (1 of 3 sections)` in the warning colour and the tooltip lists
+each section with the missing metres and where they start. Only sections a
+vehicle of the line has driven are checked; the depot is not. Single
+vehicles bought without a cart list (buses, single trams) are not checked.
+
 ## How the rough estimate works
 
 The game computes a line's rate as capacity x vehicles x (year / round trip),

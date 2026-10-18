@@ -243,6 +243,19 @@ do
 	near("Emmaboda min speed", r and r.minSpeed * 3.6, 15.6, 1.5)
 	near("Emmaboda grade", r and r.grade, 0.10, 0.01)
 end
+-- catenary: a part needs it when it has engines and all are electric (engine type,
+-- not the model's transportModes: every base loco lists TRAIN and ELECTRIC_TRAIN)
+local ELECTRIC, DIESEL = 3, 2
+check("electric loco needs catenary", M.consistNeedsCatenary({ { ELECTRIC }, {} }, ELECTRIC))
+check("diesel + wagons do not", not M.consistNeedsCatenary({ { DIESEL }, {}, {} }, ELECTRIC))
+check("electro-diesel part does not", not M.consistNeedsCatenary({ { DIESEL, ELECTRIC } }, ELECTRIC))
+check("diesel + electric loco needs it", M.consistNeedsCatenary({ { DIESEL }, { ELECTRIC } }, ELECTRIC))
+check("wagons only -> false", not M.consistNeedsCatenary({ {}, {} }, ELECTRIC))
+local miss = M.missingCatenary({ { length = 3000, unelectrified = 0 }, { length = 1700 },
+	{ length = 2175, unelectrified = 40, unelectrifiedAt = 820 } })
+check("missing catenary: one section", #miss == 1 and miss[1].index == 3)
+near("missing catenary metres", miss[1] and miss[1].metres, 40)
+near("missing catenary position", miss[1] and miss[1].at, 820)
 -- cost: 10 km section
 local t0 = os.clock()
 M.climbOnSection({ length = 10000, profile = profile(10, { { 10000, 0.02 } }) }, alco)

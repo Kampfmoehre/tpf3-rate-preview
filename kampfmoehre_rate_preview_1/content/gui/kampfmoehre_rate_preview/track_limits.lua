@@ -15,7 +15,8 @@
 -- a track upgrade shows without waiting MAX_AGE. Lines without vehicles have
 -- no data. Each section also keeps its height profile (edge
 -- geometry.height, resampled every 10 m in travel direction) for the
--- gradient simulation in Line Rate Preview.
+-- gradient simulation in Line Rate Preview, and the metres of rails without
+-- catenary (edge transportModes) for its "no catenary" warning.
 --
 -- Shared instance: Top Speed Reached and Line Rate Preview each ship a copy of
 -- this file and use the collector stored as field SHARED_KEY of the builtin
@@ -39,9 +40,10 @@ M.WANT_SECONDS = 5           -- a want() keeps its line prioritised this long
 M.MIN_RUN = 200              -- metres a limit must hold contiguously to count (runLimit)
 M.LOG_READS = false          -- debugging: log one line per section read (+ heights, probes of open windows)
 
--- edges = { { limit = m/s, curve = m/s, length = m, h0, h1, fwd }, ... }
+-- edges = { { limit = m/s, curve = m/s, length = m, h0, h1, fwd, noCatenary }, ... }
 -- edges in path order -> { length = m, maxLimit = m/s, runLimit = m/s,
---    byLimit = { [km/h] = m }, edges = n, profile = resampleProfile(edges) } with
+--    byLimit = { [km/h] = m }, edges = n, profile = resampleProfile(edges),
+--    unelectrified = m of noCatenary edges, unelectrifiedAt = m to the first or nil } with
 --    maxLimit = max over min(limit, curve) of all edges,
 --    runLimit = highest v with a contiguous stretch of at least
 --               min(MIN_RUN, length / 2) metres on which every edge allows >= v
@@ -50,8 +52,13 @@ M.LOG_READS = false          -- debugging: log one line per section read (+ heig
 function M.summarize(edges)
 	if type(edges) ~= "table" or #edges == 0 then return nil end
 	local length, maxLimit, byLimit, eff, values = 0, nil, {}, {}, {}
+	local unelectrified, unelectrifiedAt = 0, nil
 	for i, e in ipairs(edges) do
 		local len = e.length or 0
+		if e.noCatenary then
+			if unelectrifiedAt == nil then unelectrifiedAt = length end
+			unelectrified = unelectrified + len
+		end
 		length = length + len
 		local v = e.limit
 		if e.curve and e.curve > 0 and (v == nil or e.curve < v) then v = e.curve end
@@ -85,7 +92,8 @@ function M.summarize(edges)
 		end
 	end
 	return { length = length, maxLimit = maxLimit, runLimit = runLimit or maxLimit, byLimit = byLimit, edges = #edges,
-		profile = M.resampleProfile(edges, M.PROFILE_RESAMPLE_STEP) }
+		profile = M.resampleProfile(edges, M.PROFILE_RESAMPLE_STEP),
+		unelectrified = unelectrified, unelectrifiedAt = unelectrifiedAt }
 end
 
 -- Heights along a path. edges = { { length = m, h0 = m, h1 = m, fwd = bool? }, ... }
@@ -334,7 +342,8 @@ function Collector:lineTrackMax(line)
 end
 
 -- section ending at stop `stopIndex` (0-based): { length = m, maxLimit = m/s,
---    runLimit = m/s, profile = { step, h } or nil, at } or nil
+--    runLimit = m/s, profile = { step, h } or nil, unelectrified = m,
+--    unelectrifiedAt = m or nil, at } or nil
 function Collector:section(line, stopIndex)
 	local L = self.lines[line]
 	return L and L.sections[stopIndex] or nil
@@ -387,13 +396,36 @@ function M.engineAdapter(owner)
 		if not h then return nil end
 		return h.x or h[1], h.y or h[2]
 	end
+	-- rails without their electric variant (TRAIN without ELECTRIC_TRAIN, TRAM
+	-- without ELECTRIC_TRAM, TRAM_TRACK without ELECTRIC_TRAM_TRACK); streets
+	-- without tram rails do not count
+	local TM = api.type.enum.TransportMode
+	local railPairs = {
+		{ TM.TRAIN, TM.ELECTRIC_TRAIN },
+		{ TM.TRAM, TM.ELECTRIC_TRAM },
+		{ TM.TRAM_TRACK, TM.ELECTRIC_TRAM_TRACK },
+	}
+	local function allows(modes, m)
+		local v = modes[m]
+		return v == true or v == 1
+	end
+	local function lacksCatenary(edge)
+		local modes = edge.transportModes
+		if type(modes) ~= "table" and type(modes) ~= "userdata" then return false end
+		for __, pr in ipairs(railPairs) do
+			if allows(modes, pr[1]) and not allows(modes, pr[2]) then return true end
+		end
+		return false
+	end
 	local function edgeEntry(edge, fwd)
 		local h0, h1 = heightsOf(edge)
+		local okC, noCat = pcall(lacksCatenary, edge)
 		return {
 			limit = edge.speedLimit,
 			curve = edge.curveSpeedLimit,
 			length = edge.geometry and edge.geometry.length or 0,
 			h0 = h0, h1 = h1, fwd = fwd,
+			noCatenary = okC and noCat or false,
 		}
 	end
 	local function logEntryKeys(e, edge)

@@ -92,6 +92,18 @@ check("resample without heights", M.resampleProfile({ { length = 100 } }, 10) ==
 check("summary carries profile", M.summarize({ { limit = 20, curve = 200, length = 100, h0 = 0, h1 = 5 } }).profile ~= nil)
 check("api version 3", M.API_VERSION == 3)
 
+-- catenary: metres of edges that have rails but not their electric variant
+local cs = M.summarize({
+	{ limit = 20, length = 500 },
+	{ limit = 20, length = 40, noCatenary = true },
+	{ limit = 20, length = 300 },
+	{ limit = 20, length = 60, noCatenary = true },
+})
+near("unelectrified metres", cs and cs.unelectrified, 100)
+near("first unelectrified position", cs and cs.unelectrifiedAt, 500)
+cs = M.summarize({ { limit = 20, length = 500 } })
+check("fully electrified section", cs and cs.unelectrified == 0 and cs.unelectrifiedAt == nil)
+
 -- collector with a fake engine ---------------------------------------------
 -- vehicles: entity -> { enRoute, stopIndex, edges }
 local clock = 0
