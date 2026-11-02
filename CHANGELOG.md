@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.17.1 (2026-11-02)
+
+- Capacity counts the cargo types loaded at the line's stops, not only those the line's vehicles can
+  already carry: adding goods wagons for fish to an oil train now raises the estimate like the game
+  does (147 -> 189 instead of staying at 147, reported in Steinwallen's video).
+- New lines: the game's capacity stays 0 for about a minute after the first vehicle joins while its
+  rate is already known; the estimate then counts the line's vehicles itself instead of showing
+  "n/a (no vehicle on the line yet)". If the game has no rate yet, the text now says so.
+- Log line when the store opens (cargo types behind the capacity) and on each changed estimate.
+
 ## 0.17.0 (2026-10-18)
 
 - Climbs: on sections the line's vehicles have driven, the store simulates the cart's consist over
