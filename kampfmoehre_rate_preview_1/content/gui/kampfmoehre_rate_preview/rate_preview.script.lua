@@ -36,7 +36,7 @@
 --    second vertical builtin.BoxLayout of that render is its right column.
 
 function data()
-	local VERSION = "0.17.0"
+	local VERSION = "0.17.1"
 
 	local react = ug_require "::/gui/main/react.lua"
 	local builtin = ug_require "::/gui/main/builtin.lua"
@@ -277,13 +277,69 @@ function data()
 	-- which sums the capacity per such type). A vehicle's relevant capacity is
 	-- the sum of its per-type capacities over exactly these types, e.g. only
 	-- the 12 cargo slots of a helicopter with 20 seats + 12 slots on an oil line.
+	-- That list only knows types the line's vehicles already have capacity for,
+	-- so the types loaded at any stop (stopConfig.load, the stop icons in the
+	-- line window) are added: a goods wagon added to an oil train on a line that
+	-- loads fish raised the game's capacity 70 -> 90 and rate 147 -> 189.
+	local function lineStopLoadTypes(line)
+		local result = {}
+		pcall(function()
+			local comp = api.engine.getComponent(line, api.type.ComponentType.LINE)
+			for __, stop in ipairs(comp.stops) do
+				local load = stop.stopConfig and stop.stopConfig.load
+				if type(load) == "table" then
+					for k, v in ipairs(load) do
+						if v then result[#result + 1] = k - 1 end
+					end
+				end
+			end
+		end)
+		return result
+	end
+
 	local function lineCargoTypes(line)
+		local result, seen = {}, {}
 		local ok, types = pcall(cargo_util.getSortedProducedCargoTypes,
 			{ lineEntity = line, getTendency = true, showEmpty = true }, "CAPACITY")
-		if ok and type(types) == "table" and #types > 0 then
-			return types
+		if ok and type(types) == "table" then
+			for __, t in ipairs(types) do
+				if not seen[t] then
+					seen[t] = true
+					result[#result + 1] = t
+				end
+			end
+		end
+		for __, t in ipairs(lineStopLoadTypes(line)) do
+			if not seen[t] then
+				seen[t] = true
+				-- same filter as getSortedProducedCargoTypes
+				local okP, produced = pcall(api.engine.util.stock.isCargoTypeCurrentlyProduced, t)
+				if not okP or produced then
+					result[#result + 1] = t
+				end
+			end
+		end
+		if #result > 0 then
+			return result
 		end
 		return nil
+	end
+
+	-- The cargo types behind the capacity, logged when the store opens.
+	local function cargoTypesLogText(line)
+		local function names(list)
+			if list == nil then return "nil" end
+			local parts = {}
+			for __, t in ipairs(list) do
+				local okN, name = pcall(api.res.cargoTypeRep.getName, t)
+				parts[#parts + 1] = tostring(t) .. ":" .. tostring(okN and name or "?")
+			end
+			return "[" .. table.concat(parts, ", ") .. "]"
+		end
+		local okT, produced = pcall(cargo_util.getSortedProducedCargoTypes,
+			{ lineEntity = line, getTendency = true, showEmpty = true }, "CAPACITY")
+		return string.format("[kampfmoehre_rate_preview] cargo types line=%s: produced=%s stopLoad=%s used=%s",
+			tostring(line), names(okT and produced or nil), names(lineStopLoadTypes(line)), names(lineCargoTypes(line)))
 	end
 
 	-- e: cart entry or vehicleData with allCargoTypes {cargoTypeId : capacity},
@@ -338,14 +394,8 @@ function data()
 		return table.concat(ids, ",")
 	end
 
-	-- Current rate, capacity and vehicle count of a line.
 	local lastNaLog = nil
-	local function lineStats(line)
-		local okV, vehicles = pcall(api.engine.system.transportVehicleSystem.getLineVehicles, line)
-		local count = (okV and type(vehicles) == "table") and #vehicles or 0
-		local okR, rate = pcall(api.engine.util.line.calcLineStationThroughput, line)
-		return { count = count, capacity = lineCapacity(line), rate = (okR and rate) or 0 }
-	end
+	local lastEstimateLog = nil
 
 	---------------------------------------------------------------------------
 	-- store context: set when the store opens
@@ -369,6 +419,33 @@ function data()
 			return vehicleCapacity(vehicle)
 		end
 		return relevantCapacity({ cap = data.totalCapacity, allCargoTypes = data.allCargoTypes }, types)
+	end
+
+	-- Current rate, capacity and vehicle count of a line.
+	-- The game's "Capacity" cell stays 0 for about a minute after the first
+	-- vehicle joins a new line while its rate is already there (fresh oil line:
+	-- capacity 0, rate 233 = 66 x 1460 / 413 s); then the line's vehicles are
+	-- counted the same way as the ones being replaced.
+	local lastFallbackLog = nil
+	local function lineStats(line)
+		local okV, vehicles = pcall(api.engine.system.transportVehicleSystem.getLineVehicles, line)
+		if not (okV and type(vehicles) == "table") then vehicles = {} end
+		local okR, rate = pcall(api.engine.util.line.calcLineStationThroughput, line)
+		rate = (okR and rate) or 0
+		local capacity = lineCapacity(line)
+		if capacity <= 0 and #vehicles > 0 and rate > 0 then
+			local types = lineCargoTypes(line)
+			for __, v in ipairs(vehicles) do
+				capacity = capacity + vehicleRelevantCapacity(v, types)
+			end
+			local msg = string.format("[kampfmoehre_rate_preview] line %s: game capacity 0 with %d vehicles and rate %s, own count %d",
+				tostring(line), #vehicles, tostring(rate), capacity)
+			if msg ~= lastFallbackLog then
+				lastFallbackLog = msg
+				log.message(msg)
+			end
+		end
+		return { count = #vehicles, capacity = capacity, rate = rate }
 	end
 
 	local function contextFromEvent(name, param)
@@ -844,11 +921,18 @@ function data()
 				lastNaLog = msg
 				log.message(msg)
 			end
-			return _("rate_no_vehicles")
+			return _((stats.count == 0) and "rate_no_vehicles" or "rate_not_yet")
 		end
 		local futureCap = stats.capacity - (oldCapacityOverride or ctx.oldCapacity) + newCapacityTotal
 		if futureCap < 0 then futureCap = 0 end
 		local estimate = stats.rate * futureCap / stats.capacity
+		local msg = string.format("[kampfmoehre_rate_preview] estimate line %s: rate=%s capacity=%d - old %s + new %s = %s -> %s",
+			tostring(ctx.line), tostring(stats.rate), stats.capacity, tostring(oldCapacityOverride or ctx.oldCapacity),
+			tostring(newCapacityTotal), tostring(futureCap), tostring(estimate))
+		if msg ~= lastEstimateLog then
+			lastEstimateLog = msg
+			log.message(msg)
+		end
 		return formatInt(stats.rate) .. "  →  ≈ " .. formatInt(estimate)
 	end
 
@@ -877,6 +961,10 @@ function data()
 				log.message(string.format("[kampfmoehre_rate_preview] %s -> line=%s mode=%s oldCap=%s n=%s",
 					tostring(name), tostring(ctx and ctx.line), tostring(ctx and ctx.mode),
 					tostring(ctx and ctx.oldCapacity), tostring(ctx and ctx.replaceCount)))
+				if ctx then
+					local okL, text = pcall(cargoTypesLogText, ctx.line)
+					log.message(okL and text or ("[kampfmoehre_rate_preview] cargo types log failed: " .. tostring(text)))
+				end
 			end
 			return origFire(a, name, param, ...)
 		end
