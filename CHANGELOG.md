@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.18.0 (unreleased)
+## 0.18.0 (2026-11-14)
 
 - Real routes: the game's pathfinder gives the track between the stops, also for lines without vehicles. The speed
   row of an empty line now knows track limits, climbs and missing catenary, and the rough estimate uses the real
