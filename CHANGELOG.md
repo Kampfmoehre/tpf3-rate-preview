@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Missing catenary and the slowest climb speed are shown on their own short lines below the speed row instead of
+  after it, so the text takes less width from the vehicle preview in the cart (the game's preview branch enlarged it).
+
 ## 0.17.1 (2026-11-02)
 
 - Capacity counts the cargo types loaded at the line's stops, not only those the line's vehicles can

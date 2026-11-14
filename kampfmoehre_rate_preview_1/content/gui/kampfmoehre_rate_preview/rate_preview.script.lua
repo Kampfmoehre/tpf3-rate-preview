@@ -1107,7 +1107,7 @@ function data()
 			-- cart's consists; in Buy mode of single-vehicle carriers the shown vehicle
 			local sections, newPhys = nil, nil
 			local reachText, reachReached, reachTooltip = "", false, nil
-			local climbText = nil -- appended to the speed row: slowest point on a climb
+			local climbText = nil -- warning lines below the speed row: catenary, slowest point on a climb
 			if reachableEnabled then
 				for _, e in ipairs(cartEntries) do
 					if e.phys and (newPhys == nil or e.phys.topSpeed < newPhys.topSpeed) then newPhys = e.phys end
@@ -1182,7 +1182,7 @@ function data()
 							end
 							local function gradeOf(r) return string.format("%d %%", math.floor(r.grade * 100 + 0.5)) end
 							reachReached = false
-							climbText = fmt("rate_climb", { grade = gradeOf(worst), speed = speedOf(worst) })
+							climbText = { fmt("rate_climb", { grade = gradeOf(worst), speed = speedOf(worst) }) }
 							local lines = { _("rate_climb_tooltip") }
 							local n = #sections
 							for __, r in ipairs(affected) do
@@ -1219,7 +1219,11 @@ function data()
 							local catText = (unknown > 0)
 								and fmt("rate_no_catenary_partial", { count = #missing, total = total, unknown = unknown })
 								or fmt("rate_no_catenary", { count = #missing, total = total or #sections })
-							climbText = climbText and (catText .. " · " .. climbText) or catText
+							-- two short lines instead of one long one: the cart entry's
+							-- vehicle preview takes the rest of the width
+							local warn = { _("rate_no_catenary_title"), catText }
+							for __, line in ipairs(climbText or {}) do warn[#warn + 1] = line end
+							climbText = warn
 							local lines = { _("rate_no_catenary_tooltip") }
 							local n = #sections
 							for __, m in ipairs(missing) do
@@ -1369,9 +1373,11 @@ function data()
 
 		-- Our text block. TextView cannot wrap: a second line (reachable speed)
 		-- goes into a vertical layout, and the full text is the tooltip when
-		-- clipped. climbText: appended to the speed row in a warning colour
-		-- (slowest point on a climb). pad: spaces around the texts (the bottom bar
-		-- has no spacing); boxClass: always wrap in a vertical layout with this class.
+		-- clipped. climbText: list of warning lines below the speed row in a
+		-- warning colour (missing catenary, slowest point on a climb), one
+		-- TextView each so the block stays narrow next to the vehicle preview.
+		-- pad: spaces around the texts (the bottom bar has no spacing); boxClass:
+		-- always wrap in a vertical layout with this class.
 		local function makeRateNode(text, extra, extraReached, extraTooltip, climbText, pad, boxClass)
 			local node = builtin.TextView{
 				meta = { class = "font-scale-body" },
@@ -1395,13 +1401,6 @@ function data()
 						tooltipWhenClipped = extra,
 					},
 				}
-				if type(climbText) == "string" and climbText ~= "" then
-					row[#row + 1] = builtin.TextView{
-						meta = { class = "font-scale-body, negative" },
-						text = "· " .. climbText .. "  ",
-						tooltipWhenClipped = climbText,
-					}
-				end
 				if pad ~= "" then
 					table.insert(row, 1, builtin.TextView{ meta = { class = "font-scale-body" }, text = pad })
 				end
@@ -1419,6 +1418,13 @@ function data()
 						children = row,
 					},
 				}
+				for __, line in ipairs(type(climbText) == "table" and climbText or {}) do
+					children[#children + 1] = builtin.TextView{
+						meta = { class = "font-scale-body, negative", tooltip = extraTooltip },
+						text = pad .. line .. pad,
+						tooltipWhenClipped = line,
+					}
+				end
 			end
 			if #children == 1 and not boxClass then
 				return node
