@@ -1,7 +1,14 @@
 # Changelog
 
-## Unreleased
+## 0.18.0 (unreleased)
 
+- Real routes: the game's pathfinder gives the track between the stops, also for lines without vehicles. The speed
+  row of an empty line now knows track limits, climbs and missing catenary, and the rough estimate uses the real
+  round-trip length once enough of your lines have a route (first test: 127 instead of 137, the game settled at 123).
+- Engine physics for trains and trams, measured in game: twice the tractive effort, empty weight (a loaded train
+  climbs like an empty one), rolling resistance 0.02 kN per tonne and the slow last 5 % below the speed limit. The
+  "reaches ≈ X km/h" line and the climb speeds of trains come out higher and closer to what they drive. Road vehicles
+  keep the old model.
 - Missing catenary and the slowest climb speed are shown on their own short lines below the speed row instead of
   after it, so the text takes less width from the vehicle preview in the cart (the game's preview branch enlarged it).
 
