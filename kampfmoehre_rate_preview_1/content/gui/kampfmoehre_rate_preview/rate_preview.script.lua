@@ -36,7 +36,7 @@
 --    second vertical builtin.BoxLayout of that render is its right column.
 
 function data()
-	local VERSION = "0.17.1"
+	local VERSION = "0.18.0"
 
 	local react = ug_require "::/gui/main/react.lua"
 	local builtin = ug_require "::/gui/main/builtin.lua"
@@ -60,6 +60,12 @@ function data()
 	-- nil while the reachable speed param is Off (then no path data is read)
 	local track_limits = ug_require "kampfmoehre_rate_preview_1::/gui/kampfmoehre_rate_preview/track_limits.lua"
 	local tracks = nil
+	-- real track route between the stops from the game's pathfinder (also for
+	-- lines without vehicles); nil while both the rough estimate and the
+	-- reachable speed params are Off (then the pathfinder is never called)
+	local line_route = ug_require "kampfmoehre_rate_preview_1::/gui/kampfmoehre_rate_preview/line_route.lua"
+	local routes = nil
+	local routeCarrier = {} -- line -> carrier of the store opened for it (empty lines have no vehicle to ask)
 
 	---------------------------------------------------------------------------
 	-- helpers
@@ -140,14 +146,33 @@ function data()
 		local top = data.speedAdjusted
 		if type(top) ~= "number" or top == math.huge then top = data.speed end
 		if type(top) ~= "number" or top <= 0 or top == math.huge then return nil end
-		local brake = nil
+		local brake, railOrTram = nil, false
 		pcall(function()
+			local C = api.type.enum.Carrier
 			for _, v in ipairs(parts or {}) do
 				local b = v.landVehicle and v.landVehicle.brakeDeceleration
 				if type(b) == "number" and b > 0 and (brake == nil or b < brake) then brake = b end
+				local c = v.tv and v.tv.carrier
+				if c ~= nil and (c == C.RAIL or c == C.TRAM) then railOrTram = true end
 			end
 		end)
-		-- full load, passengers weigh 1/6 (cargo weightFactor, see rate_model.consistMass)
+		if railOrTram then
+			-- the engine's rules, measured 2026-11-14 (rate_model "Reachable speed"):
+			-- empty weight, 2 x tractive effort, 0.02 kN per tonne, fade at the limit
+			return {
+				weight = data.weight,
+				length = data.length,
+				power = data.power,
+				tractiveEffort = data.tractiveEffort,
+				teFactor = rate_model.RAIL_TE_FACTOR,
+				mu = rate_model.RAIL_MU,
+				fade = true,
+				topSpeed = top,
+				brakeDecel = brake,
+			}
+		end
+		-- road (not measurable): the store's tooltip physics, full load,
+		-- passengers weigh 1/6 (cargo weightFactor, see rate_model.consistMass)
 		local pax, any, other = passengerId(), false, false
 		if type(data.allCargoTypes) == "table" then
 			for id in pairs(data.allCargoTypes) do
@@ -631,22 +656,37 @@ function data()
 
 	-- Sections of the line as { { length = m, cap = m/s or nil, profile = { step, h }
 	-- or nil }, ... }: the real track length, speed limit and height profile where
-	-- track_limits knows the section (a
-	-- vehicle of the line has driven it since loading), else the straight-line
-	-- length without cap. Section i (stop i -> i + 1, 1-based) ends at the stop
-	-- with 0-based index i % n, track_limits' key. Second/third results: known
-	-- sections and their number.
+	-- track_limits knows the section (a vehicle of the line has driven it since
+	-- loading), else where the route cache has it from the pathfinder, else the
+	-- straight-line length without cap. Section i (stop i -> i + 1, 1-based) ends
+	-- at the stop with 0-based index i % n, track_limits' key. Second/third
+	-- results: known sections and their number.
+	-- the cached route of the line if it still matches its n sections; a route
+	-- read before the stops changed is ignored and read again (once the 5 s
+	-- straight-line cache has caught up, so a fresh read is not thrown away)
+	local function matchingRoute(line, n)
+		if not routes then return nil end
+		local ok, r = pcall(routes.route, routes, line)
+		if not (ok and r) then return nil end
+		if r.n == n then return r end
+		if os.time() - (r.at or 0) > 5 then pcall(routes.invalidate, routes, line) end
+		return nil
+	end
+
 	local function lineSectionsWithTrack(line)
 		local straight = lineSectionLengths(line)
 		if straight == nil then return nil end
 		local n, out, known = #straight, {}, 0
 		if tracks then pcall(tracks.want, tracks, line, os.time()) end
+		if routes then pcall(routes.want, routes, line, os.time()) end
+		local route = matchingRoute(line, n)
 		for i, len in ipairs(straight) do
 			local sec = nil
 			if tracks then
 				local ok, v = pcall(tracks.section, tracks, line, i % n)
 				if ok then sec = v end
 			end
+			if not sec and route and route.sections[i] then sec = route.sections[i] end
 			if sec then
 				known = known + 1
 				out[i] = { length = sec.length, cap = sec.runLimit or sec.maxLimit, profile = sec.profile,
@@ -780,8 +820,95 @@ function data()
 		return kind
 	end
 
+	-- Carrier enum value -> name ("RAIL", ...): the enum table cannot be
+	-- iterated, so the names are resolved one by one
+	local CARRIER_NAMES = { "ROAD", "RAIL", "TRAM", "AIR", "WATER" }
+	local function carrierName(c)
+		if c == nil then return nil end
+		for __, name in ipairs(CARRIER_NAMES) do
+			local ok, v = pcall(function() return api.type.enum.Carrier[name] end)
+			if ok and v ~= nil and tostring(v) == tostring(c) then return name end
+		end
+		return nil
+	end
+
+	-- Engine side of the route cache (line_route.lua): terminal node per stop,
+	-- transport modes by carrier and cargo kind, pathfinder -> edge entries.
+	local function makeRouteAdapter()
+		local CT = api.type.ComponentType
+		local edges = track_limits.engineAdapter("kampfmoehre_rate_preview")
+		local clock = api.type.Clock.new()
+		return {
+			lineStops = function(line)
+				local lc = api.engine.getComponent(line, CT.LINE)
+				if not lc or not lc.stops then return nil end
+				local stops = {}
+				for i, stop in ipairs(lc.stops) do
+					local node = nil
+					pcall(function()
+						local sg = api.engine.getComponent(stop.stationGroup, CT.STATION_GROUP)
+						local st = api.engine.getComponent(sg.stations[stop.station + 1], CT.STATION)
+						local id = st.terminals[stop.terminal + 1].vehicleNodeId
+						-- plain numbers: the NodeId userdata points into the component
+						-- copy and reads garbage once that is collected (the path is
+						-- read seconds later: "Invalid Node", engine assertion)
+						node = { entity = id.entity, index = id.index }
+					end)
+					stops[i] = { node = node, waypoints = stop.waypoints ~= nil and #stop.waypoints > 0,
+						key = tostring(stop.stationGroup) .. ":" .. tostring(stop.station) .. ":" .. tostring(stop.terminal) }
+				end
+				local okV, vs = pcall(api.engine.system.transportVehicleSystem.getLineVehicles, line)
+				local first = okV and type(vs) == "table" and vs[1] or nil
+				local carrier = first and vehicleCarrier(first) or routeCarrier[line]
+				local names = line_route.modesFor(carrierName(carrier), first and vehicleKind(first) or nil)
+				if not names then return stops, nil end
+				local modes = {}
+				for __, name in ipairs(names) do modes[#modes + 1] = api.type.enum.TransportMode[name] end
+				return stops, modes
+			end,
+			path = function(from, to, modes)
+				-- the stops were read at the start of the read, maybe steps ago: a
+				-- rebuilt station's old entity must not reach the pathfinder
+				-- (engine assertion EntityExists)
+				if not (api.engine.entityExists(from.entity) and api.engine.entityExists(to.entity)) then
+					return nil, "terminal gone"
+				end
+				local ok, result = pcall(api.engine.util.pathfinding.findPathNodeToNode,
+					{ api.type.NodeId.new(from.entity, from.index) }, { api.type.NodeId.new(to.entity, to.index) }, modes)
+				if not ok then
+					error(tostring(result) .. " (node " .. tostring(from.entity) .. "/" .. tostring(from.index)
+						.. " -> " .. tostring(to.entity) .. "/" .. tostring(to.index) .. ")", 0)
+				end
+				if type(result) ~= "table" or #result == 0 then return nil, "no path" end
+				return edges.edgesOfPath(result)
+			end,
+			clock = function() return clock:getTime() / 1e6 end,
+			log = function(msg) log.message("[kampfmoehre_rate_preview] route: " .. msg) end,
+			complete = function(line, entry)
+				local straight = 0
+				for __, len in ipairs(lineSectionLengths(line) or {}) do straight = straight + len end
+				local known = 0
+				for k = 1, entry.n do if entry.sections[k] then known = known + 1 end end
+				roughLog(string.format("route line %s: %d of %d sections, %s m (straight %.0f m), %.2f ms (max %.2f per section)",
+					tostring(line), known, entry.n, entry.length and string.format("%.0f", entry.length) or "-", straight,
+					entry.ms or 0, entry.maxMs or 0))
+			end,
+		}
+	end
+
+	-- real round-trip length of the line from the route cache, or nil (no
+	-- route, a section without path, stops changed since the read)
+	local function lineRouteLength(line)
+		local straight = lineSectionLengths(line)
+		if not straight then return nil end
+		local r = matchingRoute(line, #straight)
+		return r and r.length or nil
+	end
+
 	-- Calibration over the player's lines of one carrier and cargo kind (cached for 10 s):
-	-- { k = mean(rate*cycle/capacity), f = mean(length/(travel*topSpeed)), n = lines, kind = "pax"|"cargo"|"all" }
+	-- { k = mean(rate*cycle/capacity), f = mean(length/(travel*topSpeed)), n = lines, kind = "pax"|"cargo"|"all",
+	--   travel = fit on straight-line lengths, routeTravel = fit on route lengths (pathfinder) or nil,
+	--   nRoute = samples with a route in that fit }
 	-- cycle = frequency x vehicles (the game's round trip), travel = sum of the
 	-- engine's section times (pure driving), so f is a straight-line speed factor
 	-- free of dwell times.
@@ -819,7 +946,7 @@ function data()
 					else
 						local cycle = freq * #vs
 						local k, f = st.rate * cycle / st.capacity, len / (travel * top)
-						local sample = { len = len, top = top, stops = nStops, travel = travel }
+						local sample = { straight = len, route = lineRouteLength(line), top = top, stops = nStops, travel = travel }
 						all.k, all.f, all.n = all.k + k, all.f + f, all.n + 1
 						all.samples[#all.samples + 1] = sample
 						if kind ~= nil and vehicleKind(vs[1]) == kind then
@@ -832,19 +959,36 @@ function data()
 		end)
 		if not okC then roughLog("calibration failed: " .. tostring(errC)) end
 		local value = nil
+		local MIN = rate_model.MIN_FIT_SAMPLES
 		-- the travel model needs a handful of lines; prefer the same kind, else the carrier
-		if same.n >= rate_model.MIN_FIT_SAMPLES or (same.n > 0 and all.n < rate_model.MIN_FIT_SAMPLES) then
-			value = { k = same.k / same.n, f = same.f / same.n, n = same.n, kind = kind, travel = rate_model.fitTravel(same.samples) }
+		if same.n >= MIN or (same.n > 0 and all.n < MIN) then
+			value = { k = same.k / same.n, f = same.f / same.n, n = same.n, kind = kind,
+				travel = rate_model.fitTravel(rate_model.samplesForBasis(same.samples, "straight")) }
 		elseif all.n > 0 then
-			value = { k = all.k / all.n, f = all.f / all.n, n = all.n, kind = "all", travel = rate_model.fitTravel(all.samples) }
+			value = { k = all.k / all.n, f = all.f / all.n, n = all.n, kind = "all",
+				travel = rate_model.fitTravel(rate_model.samplesForBasis(all.samples, "straight")) }
 		end
 		if value and value.travel == nil then value = nil end
+		-- the same rule on route lengths (only lines whose route is known)
+		if value then
+			local sameRoute = rate_model.samplesForBasis(same.samples, "route")
+			local allRoute = rate_model.samplesForBasis(all.samples, "route")
+			local pick = nil
+			if #sameRoute >= MIN or (#sameRoute > 0 and #allRoute < MIN) then pick = sameRoute
+			elseif #allRoute > 0 then pick = allRoute end
+			if pick then
+				value.routeTravel = rate_model.fitTravel(pick)
+				value.nRoute = #pick
+			end
+		end
 		calibCache[key] = { value = value, until_ = os.time() + 10 }
 		roughLog(string.format("calibration carrier=%s kind=%s: lines=%d sameCarrier=%d sameKind=%d used=%d(%s) skipped(stats=%d freq=%d len=%d top=%d travel=%d) k=%s f=%s",
 			tostring(carrier), tostring(kind), total, sameCarrier, same.n, value and value.n or 0, value and value.kind or "-",
 			skipped.stats, skipped.freq, skipped.len, skipped.top, skipped.travel,
 			value and string.format("%.3g", value.k) or "-", value and string.format("%.3g", value.f) or "-")
-			.. (value and string.format(" travel[%s]: p=%.3f q=%.4f b=%.1f", value.travel.mode, value.travel.p, value.travel.q, value.travel.b) or ""))
+			.. (value and string.format(" travel[%s]: p=%.3f q=%.4f b=%.1f", value.travel.mode, value.travel.p, value.travel.q, value.travel.b) or "")
+			.. (value and value.routeTravel and string.format(" route[%s, %d lines]: p=%.3f q=%.4f b=%.1f", value.routeTravel.mode,
+				value.nRoute, value.routeTravel.p, value.routeTravel.q, value.routeTravel.b) or ""))
 		return value
 	end
 
@@ -867,7 +1011,12 @@ function data()
 		end
 		kind = kind or "cargo"
 		local cal = calibration(carrier, kind)
-		local len, nStops = lineStraightLength(line)
+		local straightLen, nStops = lineStraightLength(line)
+		if routes then pcall(routes.want, routes, line, os.time()) end
+		local routeLen = lineRouteLength(line)
+		local basis = rate_model.chooseBasis(routeLen ~= nil and cal ~= nil and cal.routeTravel ~= nil, cal and cal.nRoute)
+		local len = (basis == "route") and routeLen or straightLen
+		local params = cal and ((basis == "route") and cal.routeTravel or cal.travel)
 		if not cal or not len or not nStops or nStops < 1 then
 			roughLog("line " .. tostring(line) .. ": cal=" .. tostring(cal and cal.n) .. " len=" .. tostring(len) .. " -> no estimate")
 			return nil
@@ -882,18 +1031,24 @@ function data()
 		-- the dwell model is per vehicle: several vehicles load in parallel on their own stops
 		local perVehicle = capacity / math.max(1, consist.vehicles or 1)
 		local stops = rate_model.stopsForNewLine(kind, perVehicle, loadSpeed, penalties)
-		local travel = rate_model.travelSeconds(len, topSpeed, nStops, cal.travel)
-		local cycle = rate_model.cycleSeconds(len, topSpeed, stops, cal.travel)
+		local travel = rate_model.travelSeconds(len, topSpeed, nStops, params)
+		local cycle = rate_model.cycleSeconds(len, topSpeed, stops, params)
 		local rate = rate_model.rate(capacity, cal.k, cycle)
 		if rate == nil or travel == nil then
 			roughLog("line " .. tostring(line) .. ": travel model gave nil -> no estimate")
 			return nil
 		end
+		-- for comparison in the log: the same estimate on straight lines
+		local straightRate = nil
+		if basis == "route" then
+			straightRate = rate_model.rate(capacity, cal.k, rate_model.cycleSeconds(straightLen, topSpeed, stops, cal.travel))
+		end
 		local modsText = {}
 		for i = 1, nStops do modsText[i] = tostring(mods[i] or "?") end
-		roughLog(string.format("line %s: len=%.0f m stops=%d topSpeed=%.1f m/s travel=%.0f s dwell=%.0f s cycle=%.0f s capacity=%d/%d kind=%s loadSpeed=%s classes=%s termMods=[%s] cal=%s/%d k=%.0f travel[%s] -> rate %.1f",
-			tostring(line), len, nStops, topSpeed, travel, cycle - travel, cycle, capacity, consist.vehicles or 1, kind, tostring(loadSpeed),
-			table.concat(classes, "+"), table.concat(modsText, ","), cal.kind, cal.n, cal.k, cal.travel.mode, rate))
+		roughLog(string.format("line %s: basis=%s len=%.0f m (straight %.0f m) stops=%d topSpeed=%.1f m/s travel=%.0f s dwell=%.0f s cycle=%.0f s capacity=%d/%d kind=%s loadSpeed=%s classes=%s termMods=[%s] cal=%s/%d k=%.0f travel[%s] -> rate %.1f%s",
+			tostring(line), basis, len, straightLen, nStops, topSpeed, travel, cycle - travel, cycle, capacity, consist.vehicles or 1, kind, tostring(loadSpeed),
+			table.concat(classes, "+"), table.concat(modsText, ","), cal.kind, cal.n, cal.k, params.mode, rate,
+			straightRate and string.format(" (straight basis %.1f)", straightRate) or ""))
 		return rate
 	end
 
@@ -955,6 +1110,10 @@ function data()
 			if name == "buyVehicles" or name == "replaceVehicles" or name == "modifyVehicles" then
 				local ok, result = pcall(contextFromEvent, name, param)
 				ctx = ok and result or nil
+				if ctx and routes then
+					routeCarrier[ctx.line] = ctx.carrier
+					pcall(routes.want, routes, ctx.line, os.time())
+				end
 				if not ok then
 					log.warning("[kampfmoehre_rate_preview] context failed: " .. tostring(result))
 				end
@@ -1125,9 +1284,11 @@ function data()
 					for i, sec in ipairs(sections or {}) do
 						secText[i] = string.format("%.0f", sec.length) .. (sec.cap and string.format("@%.0f", sec.cap * 3.6) or "")
 					end
-					roughLog(string.format("reach line %s: sections=[%s] weight=%.1f t power=%.0f kW tractive=%.0f kN friction=%.3f top=%.1f brake=%s -> %s",
+					roughLog(string.format("reach line %s: sections=[%s] weight=%.1f t power=%.0f kW tractive=%.0f kN x%s %s top=%.1f brake=%s -> %s",
 						tostring(ctx.line), table.concat(secText, ","), newPhys.weight, newPhys.power, newPhys.tractiveEffort,
-						newPhys.friction or 0, newPhys.topSpeed * 3.6, tostring(newPhys.brakeDecel), reach and string.format("%.1f km/h", reach * 3.6) or "nil"))
+						tostring(newPhys.teFactor or 1),
+						newPhys.mu and string.format("mu=%.3f fade=%s", newPhys.mu, tostring(newPhys.fade)) or string.format("friction=%.3f", newPhys.friction or 0),
+						newPhys.topSpeed * 3.6, tostring(newPhys.brakeDecel), reach and string.format("%.1f km/h", reach * 3.6) or "nil"))
 					if reach and reach < 0.98 * newPhys.topSpeed then
 						local okF, sp = pcall(api.util.formatSpeed, reach)
 						reachText = _("rate_reaches") .. " ≈ " .. ((okF and sp) or string.format("%.0f km/h", reach * 3.6))
@@ -1530,11 +1691,12 @@ function data()
 	local TRACK_STEP_INTERVAL = 2
 	local TRACK_LIST_INTERVAL = 10
 	local trackVehicles, trackVehicleLine, sinceTrackList = {}, {}, TRACK_LIST_INTERVAL
+	local routeLines = {} -- lines with vehicles (calibration), only while the rough estimate is On
 	local function trackStep()
 		sinceTrackList = sinceTrackList + TRACK_STEP_INTERVAL
 		if sinceTrackList >= TRACK_LIST_INTERVAL then
 			sinceTrackList = 0
-			local list, lineOf = {}, {}
+			local list, lineOf, withVehicles = {}, {}, {}
 			local okP, player = pcall(api.engine.util.getPlayer)
 			local okL, lines = false, nil
 			if okP and player ~= nil then okL, lines = pcall(api.engine.system.lineSystem.getLinesForPlayer, player) end
@@ -1542,6 +1704,7 @@ function data()
 				for __, line in ipairs(lines) do
 					local okV, vs = pcall(api.engine.system.transportVehicleSystem.getLineVehicles, line)
 					if okV and type(vs) == "table" then
+						if #vs > 0 then withVehicles[#withVehicles + 1] = line end
 						for __, v in ipairs(vs) do
 							list[#list + 1] = v
 							lineOf[v] = line
@@ -1550,8 +1713,11 @@ function data()
 				end
 			end
 			trackVehicles, trackVehicleLine = list, lineOf
+			routeLines = roughEnabled and withVehicles or {}
 		end
-		tracks:step(trackVehicles, trackVehicleLine, os.time())
+		if tracks then tracks:step(trackVehicles, trackVehicleLine, os.time()) end
+		-- routes of all lines for the calibration, else only the store's line (wanted)
+		if routes then routes:step(routeLines, os.time()) end
 	end
 
 	local rate_preview = {}
@@ -1567,6 +1733,15 @@ function data()
 				if type(mine) == "table" and mine.roughEstimate == 2 then roughEnabled = true end
 				reachableEnabled = not (type(mine) == "table" and mine.reachableSpeed == 1)
 				tracks, trackVehicles, trackVehicleLine, sinceTrackList = nil, {}, {}, TRACK_LIST_INTERVAL
+				routes, routeLines, routeCarrier = nil, {}, {}
+				if roughEnabled or reachableEnabled then
+					local okR, cache = pcall(function() return line_route.new(makeRouteAdapter(), track_limits.summarize) end)
+					if okR then
+						routes = cache
+					else
+						log.warning("[kampfmoehre_rate_preview] routes unavailable: " .. tostring(cache))
+					end
+				end
 				if reachableEnabled then
 					local okT, shared = pcall(track_limits.getShared, builtin, track_limits.engineAdapter, "kampfmoehre_rate_preview")
 					if okT then
@@ -1578,11 +1753,12 @@ function data()
 				end
 				log.message("[kampfmoehre_rate_preview] rough estimate for empty lines: " .. tostring(roughEnabled)
 					.. ", reachable speed: " .. tostring(reachableEnabled)
-					.. (tracks and (", track limits (collector API " .. tostring(tracks.API_VERSION) .. " from " .. tostring(tracks.owner) .. ")") or ""))
+					.. (tracks and (", track limits (collector API " .. tostring(tracks.API_VERSION) .. " from " .. tostring(tracks.owner) .. ")") or "")
+					.. (routes and ", routes" or ""))
 			end)
-			-- track sampler: only while the reachable speed param is On
+			-- track and route sampler: only while one of the two params is On
 			react.onStepTimer(function()
-				if not tracks then return end
+				if not tracks and not routes then return end
 				local ok, err = pcall(trackStep)
 				if not ok then log.warning("[kampfmoehre_rate_preview] track step failed: " .. tostring(err)) end
 			end, TRACK_STEP_INTERVAL)

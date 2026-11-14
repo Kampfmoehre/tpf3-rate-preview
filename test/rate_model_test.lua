@@ -261,6 +261,42 @@ local t0 = os.clock()
 M.climbOnSection({ length = 10000, profile = profile(10, { { 10000, 0.02 } }) }, alco)
 check("10 km section < 5 ms", os.clock() - t0 < 0.005)
 
+-- calibration basis: route lengths (pathfinder) or straight lines -----------
+local basisSamples = { { straight = 1000, route = 1300, top = 30, stops = 2, travel = 90 },
+	{ straight = 2000, top = 30, stops = 2, travel = 150 } }
+check("route basis drops samples without route", #M.samplesForBasis(basisSamples, "route") == 1)
+near("route basis uses route length", M.samplesForBasis(basisSamples, "route")[1].len, 1300)
+near("straight basis keeps straight length", M.samplesForBasis(basisSamples, "straight")[2].len, 2000)
+check("straight basis keeps all samples", #M.samplesForBasis(basisSamples, "straight") == 2)
+check("basis needs target route", M.chooseBasis(false, 50) == "straight")
+check("basis needs 6 route samples", M.chooseBasis(true, 5) == "straight")
+check("basis route", M.chooseBasis(true, 6) == "route")
+
+-- engine physics for rail and tram (measured 2026-11-14, docs/probes/physics_probe) -----
+-- TE x2: from 0 to 5 m/s entirely in the TE regime (knee P / 2 TE = 5 m/s)
+local rail = { weight = 100, power = 1000, tractiveEffort = 100, mu = 0.02, teFactor = 2, fade = true, topSpeed = 40 }
+local __, tRail = M.accelDistanceTime(rail, 5)
+near("pull uses 2 x TE", tRail, 100 * 5 / (200 - 2), 0.01)
+-- mu: resistance per tonne
+local heavy = { weight = 100, power = 1e6, tractiveEffort = 100, mu = 0.02, teFactor = 1, topSpeed = 40 }
+local __, tMu = M.accelDistanceTime(heavy, 10)
+near("friction per tonne", tMu, 10 / 0.98, 0.01)
+-- fade: only above 95 % of (top + 0.136 m/s)
+local noFade = { weight = 100, power = 1000, tractiveEffort = 100, mu = 0.02, teFactor = 2, fade = false, topSpeed = 40 }
+local dFade = M.accelDistanceTime(rail, 0.99 * 40)
+local dPlain = M.accelDistanceTime(noFade, 0.99 * 40)
+check("fade slows the last 5 %", dFade and dPlain and dFade > dPlain * 1.02)
+near("fade off below 95 %", M.accelDistanceTime(rail, 0.9 * 40), M.accelDistanceTime(noFade, 0.9 * 40), 0.01)
+check("fade keeps the top speed reachable", M.reachableSpeed(1e6, rail) == 40)
+-- climbs: mu equals the same absolute friction, TE x2 decides whether it stalls
+local climbSec = { length = 2000, profile = profile(10, { { 2000, 0.10 } }) }
+local withMu = M.climbOnSection(climbSec, { weight = 100, power = 1000, tractiveEffort = 30, mu = 0.02, teFactor = 2, topSpeed = 20, length = 50 })
+local withF = M.climbOnSection(climbSec, { weight = 100, power = 1000, tractiveEffort = 30, friction = 2, teFactor = 2, topSpeed = 20, length = 50 })
+near("climb mu = friction mu x weight", withMu and withMu.minSpeed, withF and withF.minSpeed, 1e-6)
+check("climb with 2 x TE does not stall", withMu and not withMu.stalls)
+local single = M.climbOnSection(climbSec, { weight = 100, power = 1000, tractiveEffort = 30, mu = 0.02, teFactor = 1, topSpeed = 20, length = 50 })
+check("climb with 1 x TE stalls", single and single.stalls)
+
 if failures > 0 then
 	print(failures .. " failure(s)")
 	os.exit(1)

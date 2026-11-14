@@ -452,6 +452,16 @@ function M.engineAdapter(owner)
 		log.message(prefix .. "path entry {" .. table.concat(keys, ", ") .. "} height {" .. table.concat(hk, ", ")
 			.. "} (" .. type(h) .. ") calcPosition(0).z=" .. z0)
 	end
+	-- path entries (MOVE_PATH edges, pathfinder results) -> edge entries
+	local function edgesOfPath(entries)
+		local out, networks = {}, {}
+		for __, e in ipairs(entries) do
+			local edge, fwd = networkEdge(e, networks)
+			logEntryKeys(e, edge)
+			if edge then out[#out + 1] = edgeEntry(edge, fwd) end
+		end
+		return out
+	end
 	return {
 		vehicleSection = function(v)
 			local tv = component(v, CT.TRANSPORT_VEHICLE)
@@ -461,14 +471,9 @@ function M.engineAdapter(owner)
 		pathEdges = function(v)
 			local mp = component(v, CT.MOVE_PATH)
 			if not mp or not mp.path then return nil end
-			local out, networks = {}, {}
-			for __, e in ipairs(mp.path.edges) do
-				local edge, fwd = networkEdge(e, networks)
-				logEntryKeys(e, edge)
-				if edge then out[#out + 1] = edgeEntry(edge, fwd) end
-			end
-			return out
+			return edgesOfPath(mp.path.edges)
 		end,
+		edgesOfPath = edgesOfPath,
 		-- debugging: one line per call with speed and the gradient under the vehicle
 		probe = M.LOG_READS and function(v, line)
 			local mp = component(v, CT.MOVE_PATH)

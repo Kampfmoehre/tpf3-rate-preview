@@ -162,6 +162,28 @@ function M.fitTravel(samples)
 	return nil
 end
 
+-- Length basis of the fit: the real track route between the stops (game
+-- pathfinder, line_route.lua) or the straight line. The two never mix in one
+-- fit: the detour factor p means something else on each.
+-- samples: list of { straight, route = m or nil, top, stops, travel }
+-- -> list of { len, top, stops, travel } for fitTravel; basis "route" drops
+--    samples without a route
+function M.samplesForBasis(samples, basis)
+	local out = {}
+	for __, s in ipairs(samples or {}) do
+		local len = s.straight
+		if basis == "route" then len = s.route end
+		if len then out[#out + 1] = { len = len, top = s.top, stops = s.stops, travel = s.travel } end
+	end
+	return out
+end
+
+-- "route" when the target line has a route and enough reference samples have one
+function M.chooseBasis(targetHasRoute, nRouteSamples)
+	if targetHasRoute and (nRouteSamples or 0) >= M.MIN_FIT_SAMPLES then return "route" end
+	return "straight"
+end
+
 function M.travelSeconds(lengthMetres, topSpeed, nStops, params)
 	if not (lengthMetres and topSpeed and params) or lengthMetres <= 0 or topSpeed <= 0 then return nil end
 	local t = (params.p or 0) * lengthMetres / topSpeed + (params.q or 0) * lengthMetres + (params.b or 0) * (nStops or 0)
@@ -188,38 +210,67 @@ end
 
 ---------------------------------------------------------------------------
 -- Reachable speed between stops (land vehicles).
--- The game's own tooltip physics (vehicle_util.getPowerRatingTextAndToolTip):
--- pull F(v) = min(tractiveEffort, power / v), acceleration a(v) =
+-- pull F(v) = min(teFactor x tractiveEffort, power / v), acceleration a(v) =
 -- (F(v) - resistance) / weight with tractiveEffort in kN, power in kW, weight
--- in t (incl. full payload), v in m/s; on the flat resistance = rolling
--- friction. Braking is uniform (brakeDeceleration, m/s^2). A section of
+-- in t, v in m/s; on the flat resistance = rolling friction. Rail and tram
+-- (measured 2026-11-14, docs/probes/physics_probe, rules from the decompiled
+-- engine in Vehicle Power Tooltip 6419746): teFactor 2, weight = empty weight,
+-- friction = mu x weight with mu = 0.02 kN/t, and the acceleration fades
+-- out in the last 5 % below the speed limit. Road vehicles keep the store's
+-- tooltip physics (teFactor 1, full payload, absolute friction): road was not
+-- measurable. Braking is uniform (brakeDeceleration, m/s^2). A section of
 -- length d allows the largest v <= topSpeed with accelDistance(v) +
 -- v^2 / (2 b) <= d.
--- phys = { weight, power, tractiveEffort, friction, topSpeed, brakeDecel }
+-- phys = { weight, power, tractiveEffort, teFactor?, mu? or friction?, fade?,
+--          topSpeed, brakeDecel }
 ---------------------------------------------------------------------------
 M.ACCEL_INTEGRATION_STEPS = 200
 M.DEFAULT_BRAKE_DECEL = 2.5
+M.RAIL_TE_FACTOR = 2
+M.RAIL_MU = 0.02            -- kN per tonne
+M.FADE_START = 0.95         -- share of (limit + FADE_OFFSET) where the fade begins
+M.FADE_SLOPE = 20
+M.FADE_OFFSET = 0.136       -- m/s
+
+local function maxPull(phys)
+	return (phys.teFactor or 1) * phys.tractiveEffort
+end
 
 local function pull(phys, v)
-	if v <= 0 then return phys.tractiveEffort end
-	return math.min(phys.tractiveEffort, phys.power / v)
+	if v <= 0 then return maxPull(phys) end
+	return math.min(maxPull(phys), phys.power / v)
+end
+
+-- rolling resistance in kN: per tonne (mu) or absolute (friction)
+local function rolling(phys)
+	if phys.mu then return phys.mu * phys.weight end
+	return phys.friction or 0
+end
+
+-- acceleration a scaled by the engine's fade below `limit` (positive a only)
+local function faded(phys, v, limit, a)
+	if not phys.fade or a <= 0 then return a end
+	local x = (v / (limit + M.FADE_OFFSET) - M.FADE_START) * M.FADE_SLOPE
+	if x <= 0 then return a end
+	if x > 1 then x = 1 end
+	return a * (1 - x * x)
 end
 
 -- true if the consist can accelerate at all on the flat
 local function physValid(phys)
 	return type(phys) == "table" and (phys.weight or 0) > 0 and (phys.power or 0) > 0
 		and (phys.tractiveEffort or 0) > 0 and (phys.topSpeed or 0) > 0
-		and phys.tractiveEffort > (phys.friction or 0)
+		and maxPull(phys) > rolling(phys)
 end
 
 -- distance (m) and time (s) to accelerate from standstill to v on the flat; nil if impossible
 function M.accelDistanceTime(phys, v)
 	if not physValid(phys) or v <= 0 then return nil end
-	local friction = phys.friction or 0
-	local function invA(u) -- weight / (F(u) - friction) = 1 / a(u)
-		local f = pull(phys, u) - friction
-		if f <= 0 then return nil end
-		return phys.weight / f
+	local friction = rolling(phys)
+	local function invA(u) -- 1 / a(u)
+		local a = faded(phys, u, phys.topSpeed, (pull(phys, u) - friction) / phys.weight)
+		if a <= 0 then return nil end
+		return 1 / a
 	end
 	-- Simpson's rule, split at the kink v_t = power / tractiveEffort
 	local function simpson(a, b, fn)
@@ -235,7 +286,7 @@ function M.accelDistanceTime(phys, v)
 		end
 		return sum * h / 3
 	end
-	local vt = phys.power / phys.tractiveEffort
+	local vt = phys.power / maxPull(phys)
 	local dist, time = 0, 0
 	local segments = (vt > 0 and vt < v) and { { 0, vt }, { vt, v } } or { { 0, v } }
 	for _, seg in ipairs(segments) do
@@ -296,10 +347,10 @@ end
 -- Gradients (measured 2026-10-18 against MOVE_PATH.dyn.accel, rms 0.005 m/s²):
 -- a = (F(v) - friction - G * s * m) / m with the game's own G = 3.27
 -- (vehicle_util.tl calcDownhillSlopeForce, a third of real gravity) and
--- s = mean grade under the train. Mass: empty weight + max payload times the
--- cargo's weightFactor (1.0 goods, 1/6 passengers, base/content/cargos), i.e.
--- full load; a loaded stone train climbed lighter than that, so this errs on
--- the slow side.
+-- s = mean grade under the train. Mass: the empty weight for rail and tram
+-- (a loaded train climbs like an empty one, measured 2026-10-18 and
+-- 2026-11-14); road vehicles keep empty weight + max payload times the cargo's
+-- weightFactor (1.0 goods, 1/6 passengers, base/content/cargos).
 -- section = { length = m, cap = m/s?, profile = { step = m, h = { h(0), h(step), ... } } }
 -- (track_limits.lua, travel direction); phys as above plus length (train, m).
 ---------------------------------------------------------------------------
@@ -332,7 +383,7 @@ end
 -- grade under the train per position.
 local function speedRun(profile, length, phys, withGrade, trainLength)
 	local step, m, G = profile.step, phys.weight, M.GRAVITY
-	local friction = phys.friction or 0
+	local friction = rolling(phys)
 	local vmax = phys.topSpeed
 	if phys.cap and phys.cap < vmax then vmax = phys.cap end
 	local n = math.floor(length / step) + 1
@@ -349,11 +400,11 @@ local function speedRun(profile, length, phys, withGrade, trainLength)
 			else
 				s = (heightAt(profile, x) - heightAt(profile, x - trainLength)) / trainLength
 			end
-			if G * s * m + friction >= phys.tractiveEffort then run = run + step else run = 0 end
+			if G * s * m + friction >= maxPull(phys) then run = run + step else run = 0 end
 			if run > stall then stall = run end
 		end
 		slopes[k] = s
-		local a = (pull(phys, v) - friction - G * s * m) / m
+		local a = faded(phys, v, vmax, (pull(phys, v) - friction - G * s * m) / m)
 		local v2 = v * v + 2 * a * step
 		v = v2 > 0 and math.sqrt(v2) or 0
 		if v < M.CLIMB_MIN_SPEED then v = M.CLIMB_MIN_SPEED end
@@ -365,9 +416,9 @@ end
 -- speed the consist can hold on grade s (pull = resistance), capped at vmax;
 -- 0 if it cannot climb s at all
 local function balanceSpeed(phys, s, vmax)
-	local force = (phys.friction or 0) + M.GRAVITY * s * phys.weight
+	local force = rolling(phys) + M.GRAVITY * s * phys.weight
 	if force <= 0 then return vmax end
-	if force >= phys.tractiveEffort then return 0 end
+	if force >= maxPull(phys) then return 0 end
 	return math.min(vmax, phys.power / force)
 end
 
@@ -384,6 +435,7 @@ function M.climbOnSection(section, phys)
 	local trainLength = phys.length or M.DEFAULT_TRAIN_LENGTH
 	if trainLength <= 0 then trainLength = M.DEFAULT_TRAIN_LENGTH end
 	local p = { weight = phys.weight, power = phys.power, tractiveEffort = phys.tractiveEffort,
+		teFactor = phys.teFactor, mu = phys.mu, fade = phys.fade,
 		friction = phys.friction, topSpeed = phys.topSpeed, cap = section.cap }
 	local grade, stall, slopes = speedRun(profile, length, p, true, trainLength)
 	local flat = speedRun(profile, length, p, false, trainLength)
